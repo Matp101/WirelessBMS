@@ -1,0 +1,253 @@
+<html>
+
+<head>
+	<style>
+		table,
+		th,
+		td {
+			border: 1px solid black;
+			border-collapse: collapse;
+		}
+
+		p {
+			margin: 0px;
+		}
+	</style>
+</head>
+
+<body>
+	<div id="sd-color" style="width: 100%; height: 20px; background-color: red;">
+		<p style="text-align: center; justify-content: center;">Not currently writing to sd output</p>
+	</div>
+	<div>
+		<br>
+		<label for="interval">Update interval (seconds):</label>
+		<input type="number" id="interval" min="1" value="5">
+	</div>
+	<div id="parent">
+		<h2>Parent</h2>
+		<table cellpadding="5">
+			<thead>
+				<tr>
+					<th><strong>Voltage (V)</strong></th>
+					<th><strong>Current (mah)</strong></th>
+				</tr>
+			</thead>
+			<tbody>
+				<tr>
+					<th>0</th>
+					<th>0</th>
+				</tr>
+			</tbody>
+		</table>
+		<br>
+		<div id="sd" style="display: block ruby;">
+			<button id="sdbutton" class="button" onclick="toggleSDwrite()">SD Card write</button>
+			<p id="sd-status">SD card not found</p>
+		</div>
+	</div>
+
+	<div id="nodes-info">
+		<h2>Nodes</h2>
+		<table cellpadding="5">
+			<thead>
+				<tr>
+					<th>Cell</th>
+					<th>ID</th>
+					<th>SN</th>
+					<th>Voltage (V)</th>
+					<th>Voltage Raw</th>
+					<th>Balance State</th>
+					<th>Calibration Offset</th>
+					<th>Calibration Scale</th>
+					<th>Free Heap Memory</th>
+					<th>Actions</th>
+				</tr>
+			</thead>
+			<tbody id="nodes-table">
+				<tr id="row434116965">
+					<td>
+						<p id="cell-434116965">0</p>
+						<p>
+							<input type="number" value="0" id="cell-edit-434116965" style="display:none">
+						</p>
+					</td>
+					<td>434116965</td>
+					<td>0</td>
+					<td>0.057478003</td>
+					<td>14</td>
+					<td>false</td>
+					<td>
+						<p id="offset-434116965">0</p>
+						<p>
+							<input type="number" value="0" id="offset-edit-434116965" style="display:none">
+						</p>
+					</td>
+					<td>
+						<p id="scale-434116965">1</p>
+						<p>
+							<input type="number" value="1" id="scale-edit-434116965" style="display:none">
+						</p>
+					</td>
+					<td>39192</td>
+					<td>
+						<button id="edit-434116965" onclick="enableEditing(434116965)">Edit</button>
+						<button id="submit-434116965" onclick="submitChanges(434116965)"
+							style="display:none;">Submit</button>
+						<button id="cancel-434116965" onclick="cancelEdit(434116965)"
+							style="display:none;">Cancel</button>
+					</td>
+				</tr>
+			</tbody>
+			<!-- <tbody id="nodes-table">
+			</tbody> -->
+		</table>
+	</div>
+
+	<script>
+		let isEditing = false;
+
+		function updateNodesTable(nodes) {
+			if (isEditing) return;
+			let tableContent = '';
+			nodes.forEach(node => {
+				tableContent += `<tr id="row${node.info.id}">
+		            <td>
+						<p id="cell-${node.info.id}">${node.info.cell}</p>
+		            	<input type="number" value="${node.info.cell}" id="cell-edit-${node.info.id}" style="display:none"/>
+					</td>
+		            <td>${node.info.id}</td>
+		            <td>${node.info.sn}</td>
+		            <td>${node.cell.v}</td>
+		            <td>${node.cell.v_raw}</td>
+		            <td>${node.bal.state}</td>
+		            <td>
+						<p id="offset-${node.info.id}">${node.info.cell}</p>
+						<input type="number" value="${node.cell.cal_offset}" id="offset-edit-${node.info.id}" style="display:none"/>
+					</td>
+		            <td>
+						<p id="scale-${node.info.id}">${node.cell.cal_scale}</p>
+						<input type="number" value="${node.cell.cal_scale}" id="scale-edit-${node.info.id}" style="display:none"/>
+					</td>
+		            <td>${node.info.free_mem}</td>
+					<td>
+                        <button id="edit-${node.info.id}" onclick="enableEditing(${node.info.id})">Edit</button>
+                        <button id="submit-${node.info.id}" onclick="submitChanges(${node.info.id})" style="display:none;">Submit</button>
+                        <button id="cancel-${node.info.id}" onclick="cancelEdit(${node.info.id})" style="display:none;">Cancel</button>
+                    </td>
+                </tr>`;
+			});
+			document.getElementById('nodes-table').innerHTML = tableContent;
+		}
+
+		function fetchNodesData() {
+			fetch('/getNodes')
+				.then(response => response.json())
+				.then(data => {
+					updateNodesTable(data.nodes);
+				});
+		}
+
+		function toggleSDwrite() {
+			fetch('/toggleSD')
+				.then(response => response.json())
+				.then(data => {
+					const sdDiv = document.getElementById('sd-color');
+					if (data.sdStatus) {
+						sdDiv.style.backgroundColor = 'green';
+						sdDiv.innerHTML = '<p style="text-align: center; justify-content: center;">Writing to sd output</p>';
+					} else {
+						sdDiv.style.backgroundColor = 'red';
+						sdDiv.innerHTML = '<p style="text-align: center; justify-content: center;">Not currently writing to sd output</p>';
+					}
+				});
+		}
+
+		// Fetch nodes data on page load
+		window.onload = fetchNodesData;
+
+		let currentInterval;
+
+		document.getElementById('interval').addEventListener('change', function () {
+			// Clear the existing interval
+			if (currentInterval) {
+				clearInterval(currentInterval);
+			}
+
+			// Set the new interval based on the input value
+			const milliseconds = this.value * 1000;
+			currentInterval = setInterval(fetchNodesData, milliseconds);
+			console.log('changed to ' + document.getElementById('interval').value * 1000)
+		});
+
+		// Set the initial interval when the page loads
+		currentInterval = setInterval(fetchNodesData, document.getElementById('interval').value * 1000);
+
+		function submitChanges(nodeId) {
+			// 1. Grab the current values of the editable cells for a given node.
+			let cellValue = document.getElementById(`cell-edit-${nodeId}`).value;
+			let offsetValue = document.getElementById(`offset-edit-${nodeId}`).value;
+			let scaleValue = document.getElementById(`scale-edit-${nodeId}`).value;
+
+			// Construct the data payload to send
+			let data = {
+				set: {
+					node_id: nodeId,
+					cell: parseInt(cellValue),
+					callibration_offset: parseFloat(offsetValue),
+					callibration_scale: parseFloat(scaleValue)
+				}
+			};
+
+			// 2. Send those values to the server
+			fetch('/updateNode', {
+				method: 'POST',
+				headers: {
+					'Content-Type': 'application/json',
+				},
+				body: JSON.stringify(data),
+			})
+				.then(response => response.json())
+				.then(data => {
+					// Handle server response
+					console.log(data);
+				})
+				.catch((error) => {
+					console.error('Error:', error);
+				});
+
+			isEditing = false;
+			fetchNodesData();
+		}
+
+
+		function enableEditing(nodeId) {
+			isEditing = true;
+			let rowToEdit = document.getElementById(`row${nodeId}`);
+			let cells = rowToEdit.querySelectorAll("td");
+
+			document.getElementById(`edit-${nodeId}`).style.display = 'none';
+			document.getElementById(`submit-${nodeId}`).style.display = 'inline-block';
+			document.getElementById(`cancel-${nodeId}`).style.display = 'inline-block';
+
+			document.getElementById(`cell-edit-${nodeId}`).style.display = 'inline-block';
+			document.getElementById(`offset-edit-${nodeId}`).style.display = 'inline-block';
+			document.getElementById(`scale-edit-${nodeId}`).style.display = 'inline-block';
+			document.getElementById(`cell-${nodeId}`).style.display = 'none';
+			document.getElementById(`offset-${nodeId}`).style.display = 'none';
+			document.getElementById(`scale-${nodeId}`).style.display = 'none';
+		}
+
+		function cancelEdit(nodeId) {
+			isEditing = false;
+			let rowToEdit = document.getElementById(`row${nodeId}`);
+			let cells = rowToEdit.querySelectorAll("td");
+			fetchNodesData();  // Reloads original data
+			document.getElementById(`edit-${nodeId}`).style.display = 'inline-block';
+			document.getElementById(`submit-${nodeId}`).style.display = 'none';
+			document.getElementById(`cancel-${nodeId}`).style.display = 'none';
+		}
+	</script>
+</body>
+
+</html>

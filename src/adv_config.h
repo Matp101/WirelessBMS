@@ -3,3 +3,6 @@
 #define VOLTAGE_DIVIDER_EEPROM_ADDRESS 16       // Address in EEPROM to store calibration data
 
 #define ADC_CLOCK_DIV_16 16             //ONLY FOR ESP32
+
+
+//#define SLAVE //INTELESENSE

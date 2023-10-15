@@ -1,46 +1,55 @@
+// TODO:
+//  Add website
+//  Add on connection, set cell number (save node_id to eeprom)
+//  if device disconnects, when reconnect, send info
+//  remove
+
 #ifdef MASTER
 #include <Arduino.h>
 #include <painlessMesh.h>
 #include <ArduinoJson.h>
-
+#include <ACS712.h>
+#include <ESPAsyncWebServer.h>
 
 #include "config.h"
 #include "adv_config.h"
-#include "voltage_divider.hpp"
-#include "balance.hpp"
 
-
-#define   BLINK_PERIOD    3000 // milliseconds until cycle repeat
-#define   BLINK_DURATION  100  // milliseconds LED is on for
-
-#if defined(DEBUG_SERIAL) && !defined(PRINTF) 
-#define PRINTF(...) { Serial.printf(__VA_ARGS__); }
+#if defined(DEBUG_SERIAL) && !defined(PRINTF)
+#define PRINTF(...)             \
+  {                             \
+    Serial.printf(__VA_ARGS__); \
+  }
 #endif
 #if defined(DEBUG_LED) && defined(LED_BUILTIN)
 #define LED LED_BUILTIN
 #endif
 
-
-
 // Prototypes
-void sendMessage(); 
-void receivedCallback(uint32_t from, String & msg);
+void sendMessage();
+void receivedCallback(uint32_t from, String &msg);
 void newConnectionCallback(uint32_t nodeId);
-void changedConnectionCallback(); 
-void nodeTimeAdjustedCallback(int32_t offset); 
+void changedConnectionCallback();
+void nodeTimeAdjustedCallback(int32_t offset);
 void delayReceivedCallback(uint32_t from, int32_t delay);
 void readVoltageAsync();
+void webserver();
 
-Scheduler     userScheduler; // to control your personal task
-painlessMesh  mesh;
+Scheduler userScheduler; // to control your personal task
+painlessMesh mesh;
+// Task taskSendMessage(TASK_SECOND * 1, TASK_FOREVER, &sendMessage ); // start with a one second interval
 
 bool calc_delay = false;
 SimpleList<uint32_t> nodes;
 
-void sendMessage() ; // Prototype
-Task taskSendMessage(TASK_SECOND * 1, TASK_FOREVER, &sendMessage ); // start with a one second interval
+IPAddress getlocalIP();
+AsyncWebServer server(80);
+IPAddress myIP(0, 0, 0, 0);
+IPAddress myAPIP(0, 0, 0, 0);
 
-//Task taskReadVoltage(TASK_SECOND * 1, TASK_FOREVER, &readVoltageAsync);
+ACS712 current_sensor(CURRENT_SENSOR_TYPE, CURRENT_SENSOR_PIN);
+
+std::map<uint32_t, String> nodeData; // NodeID -> JSON data
+
 
 #ifdef DEBUG_LED
 // Task to blink the number of nodes
@@ -48,35 +57,40 @@ Task blinkNoNodes;
 bool onFlag = false;
 #endif
 
-VoltageDivider cell_voltage(BATTERY_VOLTAGE_PIN, BATTERY_VOLTAGE_MAX, BATTERY_VOLTAGE_CALIBRATION_OFFSET, BATTERY_VOLTAGE_CALIBRATION_SCALE, VOLTAGE_DIVIDER_EEPROM_ADDRESS);
-Balancer balancer(BALANCER_PIN, BALANCER_INVERTED);
-
-void setup() {
+void setup()
+{
   Serial.begin(115200);
-  
-  cell_voltage.begin();
-  cell_voltage.setAnalogClockDivider(ADC_CLOCK_DIV_16); //ONLY FOR ESP32
 
-  balancer.begin();
-  
+  current_sensor.begin();
+
 #ifdef DEBUG_LED
   pinMode(LED, OUTPUT);
 #endif
 
-  mesh.setDebugMsgTypes(ERROR | DEBUG);  // set before init() so that you can see error messages
-
-  mesh.init(MESH_SSID, MESH_PASSWORD, &userScheduler, MESH_PORT);
+  // setup wifi mesh
+  mesh.setDebugMsgTypes(ERROR | STARTUP | DEBUG); // set before init() so that you can see error messages
+  mesh.init(MESH_SSID, MESH_PASSWORD, &userScheduler, MESH_PORT, WIFI_AP_STA, 6);
   mesh.onReceive(&receivedCallback);
+
+  mesh.stationManual(STATION_SSID, STATION_PASSWORD);
+  mesh.setHostname(HOSTNAME);
+
   mesh.onNewConnection(&newConnectionCallback);
   mesh.onChangedConnections(&changedConnectionCallback);
   mesh.onNodeTimeAdjusted(&nodeTimeAdjustedCallback);
   mesh.onNodeDelayReceived(&delayReceivedCallback);
+  mesh.setRoot(true);
+  mesh.setContainsRoot(true);
 
-  userScheduler.addTask( taskSendMessage );
-  taskSendMessage.enable();
+  myAPIP = IPAddress(mesh.getAPIP());
+  Serial.println("My AP IP is " + myAPIP.toString());
+
+  // userScheduler.addTask( taskSendMessage );
+  // taskSendMessage.enable();
 
 #ifdef DEBUG_LED
-  blinkNoNodes.set(BLINK_PERIOD, (mesh.getNodeList().size() + 1) * 2, []() {
+  blinkNoNodes.set(BLINK_PERIOD, (mesh.getNodeList().size() + 1) * 2, []()
+                   {
       // If on, switch off, else switch on
       if (onFlag)
         onFlag = false;
@@ -92,39 +106,55 @@ void setup() {
         // This results in blinks between nodes being synced
         blinkNoNodes.enableDelayed(BLINK_PERIOD - 
             (mesh.getNodeTime() % (BLINK_PERIOD*1000))/1000);
-      }
-  });
+      } });
   userScheduler.addTask(blinkNoNodes);
   blinkNoNodes.enable();
+
+  PRINTF("Starting Webserver")
+  webserver();
+  server.begin();
+
 #endif
 }
 
-void loop() {
+void loop()
+{
+  // mesh connected
   mesh.update();
-  readVoltageAsync();
+
+  // Blink LED if mesh is connected
 #ifdef DEBUG_LED
   digitalWrite(LED, !onFlag);
 #endif
 }
 
-void sendMessage() {
+// Send back to main node all the details about itself, if main node yet then broadcast
+/*
+If main esp is talking to this node
+ info:cell == 0
+ info:node_id == NodeId
+ set:callibration_offset == int
+ set:callibration_scale == int
+ set:cell == int
+ set:balance == bool
+*/
+void sendMessage()
+{
   DynamicJsonDocument doc(256);
   doc["info"]["serial_number"] = SERIAL_NUMBER;
-  doc["info"]["cell"] = cell_num;
-  doc["info"]["node_id"] = mesh.getNodeId();
-  doc["info"]["free_mem"] = ESP.getFreeHeap();  
-  doc["cell"]["voltage"] = cell_voltage.getLastVoltage();   // make sure to get last voltage rather than update current due to passive balancing
-  doc["cell"]["voltage_raw"] = cell_voltage.readRaw();
-  doc["cell"]["voltage_calibration_offset"] = cell_voltage.getCalibrationOffset();
-  doc["cell"]["voltage_calibration_scale"] = cell_voltage.getCalibrationScale();
-  doc["balance"]["state"] = balancer.getState();
+  doc["info"]["cell"] = 0;
+  // doc["info"]["node_id"] =
+
   String jsonString;
-  serializeJson(doc, jsonString);  
+  serializeJson(doc, jsonString);
 
   mesh.sendBroadcast(jsonString);
-  if (calc_delay) {
+  // mesh.sendSingle(node, jsonString);
+  if (calc_delay)
+  {
     SimpleList<uint32_t>::iterator node = nodes.begin();
-    while (node != nodes.end()) {
+    while (node != nodes.end())
+    {
       mesh.startDelayMeas(*node);
       node++;
     }
@@ -136,161 +166,234 @@ void sendMessage() {
 #endif
 }
 
-// If main esp is talking to this node
-//  info:cell == 0
-//  info:node_id == NodeId
-//  set:callibration_offset == int
-//  set:callibration_scale == int
-//  set:cell == int
-//  set:balance == bool
-void receivedCallback(uint32_t from, String & msg) {
+/*
+  doc["info"]["serial_number"] = SERIAL_NUMBER;
+  doc["info"]["cell"] = cell_num;
+  doc["info"]["node_id"] = mesh.getNodeId();
+  doc["info"]["free_mem"] = ESP.getFreeHeap();
+  doc["cell"]["voltage"] = cell_voltage.getLastVoltage();   // make sure to get last voltage rather than update current due to passive balancing
+  doc["cell"]["voltage_raw"] = cell_voltage.readRaw();
+  doc["cell"]["voltage_calibration_offset"] = cell_voltage.getCalibrationOffset();
+  doc["cell"]["voltage_calibration_scale"] = cell_voltage.getCalibrationScale();
+  doc["balance"]["state"] = balancSer.getState();
+*/
+void receivedCallback(uint32_t from, String &msg)
+{
+
 #if DEBUG_SERIAL >= 2
-  PRINTF("startHere: Received from %u msg=%s\n", from, msg.c_str());
+  PRINTF("Received from %u msg=%s\n", from, msg.c_str());
 #endif
-
-  StaticJsonDocument<256> doc;
-  DeserializationError error = deserializeJson(doc, msg);
-  if (error) {
-#if DEBUG_SERIAL >= 1
-    PRINTF("deserializeJson() failed: %s\n", error.c_str());
-#endif
-    return;
-  }
-
-  //Only talk to main esp and make sure values are present
-  if (!doc.containsKey("info") && !doc["info"].containsKey("cell"))
-    return;
-  if (doc["info"]["cell"] != 0)
-      return;
-  
-  //if main esp is talking to this node
-  if (!doc.containsKey("set"))
-    return;
-  if (!doc["set"].containsKey("node_id"))
-    return;
-  if (doc["set"]["node_id"] != mesh.getNodeId())
-    return;
-  
-  //if main esp is talking to this node //set:cell:voltage_calibration_offset
-  if (doc["set"].containsKey("callibration_offset")){
-    cell_voltage.setCalibrationOffset(doc["set"]["callibration_offset"]);
-  }
-  if (doc["set"].containsKey("callibration_scale")){
-    cell_voltage.setCalibrationScale(doc["set"]["callibration_scale"]);
-  }
-  if (doc["set"].containsKey("cell")){
-    cell_num = doc["set"]["cell"];
-  }
-  if (doc["set"].containsKey("balance")){
-    balancer.setState(doc["set"]["balance"]);
-  }
-  return;
+  nodeData[from] = msg;
 }
 
-void newConnectionCallback(uint32_t nodeId) {
+void newConnectionCallback(uint32_t nodeId)
+{
 #ifdef DEBUG_LED
   // Reset blink task
   onFlag = false;
   blinkNoNodes.setIterations((mesh.getNodeList().size() + 1) * 2);
-  blinkNoNodes.enableDelayed(BLINK_PERIOD - (mesh.getNodeTime() % (BLINK_PERIOD*1000))/1000);
+  blinkNoNodes.enableDelayed(BLINK_PERIOD - (mesh.getNodeTime() % (BLINK_PERIOD * 1000)) / 1000);
 #endif
 
 #if DEBUG_SERIAL >= 1
-  PRINTF("--> startHere: New Connection, nodeId = %u\n", nodeId);
-  PRINTF("--> startHere: New Connection, %s\n", mesh.subConnectionJson(true).c_str());
+  PRINTF("=================\nNew Connection\n");
+  PRINTF("nodeId = %u\n", nodeId);
+  PRINTF("%s\n", mesh.subConnectionJson(true).c_str());
+  PRINTF("=================\n");
 #endif
 }
 
-void changedConnectionCallback() {
-  
+void changedConnectionCallback()
+{
+
   nodes = mesh.getNodeList();
 
 #ifdef DEBUG_LED
   // Reset blink task
   onFlag = false;
   blinkNoNodes.setIterations((mesh.getNodeList().size() + 1) * 2);
-  blinkNoNodes.enableDelayed(BLINK_PERIOD - (mesh.getNodeTime() % (BLINK_PERIOD*1000))/1000);
+  blinkNoNodes.enableDelayed(BLINK_PERIOD - (mesh.getNodeTime() % (BLINK_PERIOD * 1000)) / 1000);
 #endif
 
 #if DEBUG_SERIAL >= 1
-  PRINTF("Changed connections\n");
+  // List all nodes
+  PRINTF("=================\nChanged connections\n");
   PRINTF("Num nodes: %d\n", nodes.size());
   PRINTF("Connection list:");
 
   SimpleList<uint32_t>::iterator node = nodes.begin();
-  while (node != nodes.end()) {
+  while (node != nodes.end())
+  {
     PRINTF(" %u", *node);
     node++;
   }
-  PRINTF("\n");
+  PRINTF("\n=================\n");
 #endif
 
   calc_delay = true;
 }
 
-void nodeTimeAdjustedCallback(int32_t offset) {
-#if DEBUG_SERIAL >= 1  
+void nodeTimeAdjustedCallback(int32_t offset)
+{
+#if DEBUG_SERIAL >= 1
   PRINTF("Adjusted time %u. Offset = %d\n", mesh.getNodeTime(), offset);
 #endif
 }
 
-void delayReceivedCallback(uint32_t from, int32_t delay) {
+void delayReceivedCallback(uint32_t from, int32_t delay)
+{
 #if DEBUG_SERIAL >= 1
   PRINTF("Delay to node %u is %d us\n", from, delay);
 #endif
 }
 
+//==========================================================================================
+const PROGMEM char* WEBSITE_HTML = R"html(
+<html>
 
+<head>
+    <script>
+        function updateNodesTable(nodes) {
+            let tableContent = '';
+            nodes.forEach(node => {
+                tableContent += `<tr>
+                    <td>${node.cell}</td>
+                    <td>${node.id}</td>
+                    <td>${node.sn}</td>
+                    <td>${node.voltage}</td>
+                    <td>${node.voltageRaw}</td>
+                    <td>${node.state}</td>
+                    <td>${node.calibrationOffset}</td>
+                    <td>${node.calibrationScale}</td>
+                    <td>${node.freeHeapMemory}</td>
+                </tr>`;
+            });
+            document.getElementById('nodes-table').innerHTML = tableContent;
+        }
 
-// ==================== Voltage Read Async ====================
+        function fetchNodesData() {
+            fetch('/getNodes')
+                .then(response => response.json())
+                .then(data => {
+                    updateNodesTable(data.nodes);
+                });
+        }
 
-enum VoltageReadState {
-  INITIAL,
-  DELAY,
-  READ,
-  RESTORE,
-  WAIT
-};
+        function toggleSDwrite() {
+            fetch('/toggleSD')
+                .then(response => response.json())
+                .then(data => {
+                    const sdDiv = document.getElementById('sd-color');
+                    if (data.sdStatus) {
+                        sdDiv.style.backgroundColor = 'green';
+                        sdDiv.innerHTML = '<p style="text-align: center; justify-content: center;">Writing to sd output</p>';
+                    } else {
+                        sdDiv.style.backgroundColor = 'red';
+                        sdDiv.innerHTML = '<p style="text-align: center; justify-content: center;">Not currently writing to sd output</p>';
+                    }
+                });
+        }
 
-VoltageReadState readState = INITIAL;
-unsigned long lastTime;
-bool balancer_state;
+        // Fetch nodes data on page load
+        window.onload = fetchNodesData;
+    </script>
 
-void readVoltageAsync() {
-  unsigned long currentTime = millis();
+    <style>
+        table,
+        th,
+        td {
+            border: 1px solid black;
+            border-collapse: collapse;
+        }
+    </style>
+</head>
 
-  switch (readState) {
-    case INITIAL:
-      balancer_state = balancer.getState();
-      if (balancer_state == true){
-        readState = DELAY;
-        balancer.setState(false);
-      }else {
-        readState = READ;
-      }
-      lastTime = currentTime;
-      break;
+<body>
+    <div id="sd-color" style="width: 100%; height: 20px; background-color: red;">
+        <p style="text-align: center; justify-content: center;">Not currently writing to sd output</p>
+    </div>
+    <div id="parent">
+        <h2>Parent</h2>
+        <table cellpadding="5">
+            <thead>
+                <tr>
+                    <th><strong>Voltage (V)</strong></th>
+                    <th><strong>Current (mah)</strong></th>
+                </tr>
+            </thead>
+            <tbody>
+                <tr>
+                    <th>0</th>
+                    <th>0</th>
+                </tr>
+            </tbody>
+        </table>
+        <br>
+        <div id="sd" style="display: block ruby;">
+            <button id="sdbutton" class="button" onclick="toggleSDwrite()">SD Card write</button>
+            <p id="sd-status">SD card not found</p>
+        </div>
+    </div>
 
-    case DELAY:
-      if (currentTime - lastTime >= VOLTAGE_SETTLE_DELAY) {
-        readState = READ;
-      }
-      break;
+    <div id="nodes-info">
+        <h2>Nodes</h2>
+        <table cellpadding="5">
+            <thead>
+                <tr>
+                    <th>Cell</th>
+                    <th>ID</th>
+                    <th>SN</th>
+                    <th>Voltage (V)</th>
+                    <th>Voltage Raw</th>
+                    <th>State</th>
+                    <th>Calibration Offset</th>
+                    <th>Calibration Scale</th>
+                    <th>Free Heap Memory</th>
+                </tr>
+            </thead>
+            <tbody id="nodes-table">
+                <!-- Filled dynamically via JavaScript -->
+            </tbody>
+        </table>
+    </div>
+</body>
 
-    case READ:
-      cell_voltage.readVoltage();
-      readState = RESTORE;
-      break;
+</html>
+)html";
 
-    case RESTORE:
-      balancer.setState(balancer_state);
-      readState = INITIAL;
-      break;
-    case WAIT:
-      if (currentTime - lastTime >= READ_VOLTAGE_INTERVAL * 1000) {
-        readState = INITIAL;
-      }
-      break;
-  }
+void webserver() {
+    // Endpoint to serve the main website
+    server.on("/", HTTP_GET, [](AsyncWebServerRequest *request) {
+        request->send(200, "text/html", WEBSITE_HTML);
+    });
+
+    // Endpoint to return nodes data
+    server.on("/getNodes", HTTP_GET, [](AsyncWebServerRequest *request) {
+        DynamicJsonDocument doc(1024);
+        JsonArray nodesArray = doc.createNestedArray("nodes");
+
+        for (auto &pair : nodeData) {
+            DynamicJsonDocument nodeDoc(256);
+            deserializeJson(nodeDoc, pair.second);
+            nodesArray.add(nodeDoc.as<JsonObject>());
+        }
+
+        String response;
+        serializeJson(doc, response);
+        request->send(200, "application/json", response);
+    });
+
+    // Endpoint to toggle SD write status (Placeholder for now)
+    server.on("/toggleSD", HTTP_GET, [](AsyncWebServerRequest *request) {
+        // TODO: Implement actual SD toggling logic here.
+        static bool sdStatus = false;
+        sdStatus = !sdStatus;
+        String response = String("{\"sdStatus\":") + (sdStatus ? "true" : "false") + "}";
+        request->send(200, "application/json", response);
+    });
+
+    server.begin();
 }
+
+
 #endif // MASTER

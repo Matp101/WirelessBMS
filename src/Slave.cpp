@@ -1,8 +1,10 @@
+//TOOD: EEPROM for calibration values and cell number
+
+//\#define SLAVE
 #ifdef SLAVE
 #include <Arduino.h>
 #include <painlessMesh.h>
 #include <ArduinoJson.h>
-
 
 #include "config.h"
 #include "adv_config.h"
@@ -34,7 +36,6 @@ painlessMesh  mesh;
 bool calc_delay = false;
 SimpleList<uint32_t> nodes;
 
-void sendMessage() ; // Prototype
 Task taskSendMessage(TASK_SECOND * 1, TASK_FOREVER, &sendMessage ); // start with a one second interval
 
 //Task taskReadVoltage(TASK_SECOND * 1, TASK_FOREVER, &readVoltageAsync);
@@ -48,6 +49,8 @@ bool onFlag = false;
 VoltageDivider cell_voltage(BATTERY_VOLTAGE_PIN, BATTERY_VOLTAGE_MAX, BATTERY_VOLTAGE_CALIBRATION_OFFSET, BATTERY_VOLTAGE_CALIBRATION_SCALE, VOLTAGE_DIVIDER_EEPROM_ADDRESS);
 Balancer balancer(BALANCER_PIN, BALANCER_INVERTED);
 
+uint32_t main_node = 0;
+
 void setup() {
   Serial.begin(115200);
   
@@ -60,14 +63,15 @@ void setup() {
   pinMode(LED, OUTPUT);
 #endif
 
+  //setup wifi mesh
   mesh.setDebugMsgTypes(ERROR | DEBUG);  // set before init() so that you can see error messages
-
-  mesh.init(MESH_SSID, MESH_PASSWORD, &userScheduler, MESH_PORT);
+	mesh.init(MESH_SSID, MESH_PASSWORD, &userScheduler, MESH_PORT, WIFI_AP_STA, CHANNEL);
   mesh.onReceive(&receivedCallback);
   mesh.onNewConnection(&newConnectionCallback);
   mesh.onChangedConnections(&changedConnectionCallback);
   mesh.onNodeTimeAdjusted(&nodeTimeAdjustedCallback);
   mesh.onNodeDelayReceived(&delayReceivedCallback);
+  mesh.setContainsRoot(false);
 
   userScheduler.addTask( taskSendMessage );
   taskSendMessage.enable();
@@ -97,28 +101,45 @@ void setup() {
 }
 
 void loop() {
+  // mesh connected
   mesh.update();
+
+  // Read the battery voltage and turn on balancer if needed
   readVoltageAsync();
+
+  //Blink LED if mesh is connected
 #ifdef DEBUG_LED
   digitalWrite(LED, !onFlag);
 #endif
+
 }
 
+bool isConnectedToAnyNode() {
+    return !mesh.getNodeList().empty();
+}
+
+// Send back to main node all the details about itself, if main node yet then broadcast
 void sendMessage() {
+  if (!isConnectedToAnyNode() ) {  // Check if the device is connected
+    return;  // If not connected, exit the function without sending
+  }
   DynamicJsonDocument doc(256);
-  doc["info"]["serial_number"] = SERIAL_NUMBER;
   doc["info"]["cell"] = cell_num;
-  doc["info"]["node_id"] = mesh.getNodeId();
+  doc["info"]["id"] = mesh.getNodeId();
+  doc["info"]["sn"] = SERIAL_NUMBER;
+  doc["cell"]["v"] = cell_voltage.getLastVoltage();   // make sure to get last voltage rather than update current due to passive balancing
+  doc["cell"]["v_raw"] = cell_voltage.readRaw();
+  doc["bal"]["state"] = balancer.getState();
+  doc["cell"]["cal_offset"] = cell_voltage.getCalibrationOffset();
+  doc["cell"]["cal_scale"] = cell_voltage.getCalibrationScale();
   doc["info"]["free_mem"] = ESP.getFreeHeap();  
-  doc["cell"]["voltage"] = cell_voltage.getLastVoltage();   // make sure to get last voltage rather than update current due to passive balancing
-  doc["cell"]["voltage_raw"] = cell_voltage.readRaw();
-  doc["cell"]["voltage_calibration_offset"] = cell_voltage.getCalibrationOffset();
-  doc["cell"]["voltage_calibration_scale"] = cell_voltage.getCalibrationScale();
-  doc["balance"]["state"] = balancer.getState();
   String jsonString;
   serializeJson(doc, jsonString);  
 
-  mesh.sendBroadcast(jsonString);
+  if (main_node == 0)
+    mesh.sendBroadcast(jsonString);
+  else
+    mesh.sendSingle(main_node, jsonString);
   if (calc_delay) {
     SimpleList<uint32_t>::iterator node = nodes.begin();
     while (node != nodes.end()) {
@@ -136,14 +157,18 @@ void sendMessage() {
 // If main esp is talking to this node
 //  info:cell == 0
 //  info:node_id == NodeId
-//  set:callibration_offset == int
-//  set:callibration_scale == int
+//  set:cal_offset == int
+//  set:cal_scale == int
 //  set:cell == int
 //  set:balance == bool
 void receivedCallback(uint32_t from, String & msg) {
+
 #if DEBUG_SERIAL >= 2
-  PRINTF("startHere: Received from %u msg=%s\n", from, msg.c_str());
+  PRINTF("Received from %u msg=%s\n", from, msg.c_str());
 #endif
+
+  if (from != main_node && main_node != 0)
+    return;
 
   StaticJsonDocument<256> doc;
   DeserializationError error = deserializeJson(doc, msg);
@@ -154,35 +179,63 @@ void receivedCallback(uint32_t from, String & msg) {
     return;
   }
 
-  //Only talk to main esp and make sure values are present
-  if (!doc.containsKey("info") && !doc["info"].containsKey("cell"))
-    return;
-  if (doc["info"]["cell"] != 0)
+  if (main_node != 0){
+    //Only talk to main esp and make sure values are present
+    if (!doc.containsKey("info") && !doc["info"].containsKey("cell"))
       return;
+    if (doc["info"]["cell"] != 0)
+        return;
+  
+    main_node = from;
+  }
   
   //if main esp is talking to this node
-  if (!doc.containsKey("set"))
+  if (!doc.containsKey("set")){
+    PRINTF("ERROR: No set key\n")
     return;
-  if (!doc["set"].containsKey("node_id"))
+  }
+  if (!doc["set"].containsKey("id")) {
+    PRINTF("ERROR: No id key\n")
     return;
-  if (doc["set"]["node_id"] != mesh.getNodeId())
+  }
+  if (doc["set"]["id"] != mesh.getNodeId()){
+    PRINTF("ERROR: Not my id\n")
     return;
+  }
+  PRINTF("=== Changed Settings ===")
   
   //if main esp is talking to this node //set:cell:voltage_calibration_offset
-  if (doc["set"].containsKey("callibration_offset")){
-    cell_voltage.setCalibrationOffset(doc["set"]["callibration_offset"]);
+  if (doc["set"].containsKey("cal_offset")){
+    float offset = doc["set"]["cal_offset"].as<float>();
+    cell_voltage.setCalibrationOffset(offset);
+#if DEBUG_SERIAL >= 2
+    PRINTF("set cal offset: %f\n", offset)
+#endif
   }
-  if (doc["set"].containsKey("callibration_scale")){
-    cell_voltage.setCalibrationScale(doc["set"]["callibration_scale"]);
+  if (doc["set"].containsKey("cal_scale")){
+    float scale = doc["set"]["cal_scale"].as<float>();
+    cell_voltage.setCalibrationScale(scale);
+#if DEBUG_SERIAL >= 2
+    PRINTF("set cal scale: %f\n", scale)
+#endif
   }
   if (doc["set"].containsKey("cell")){
-    cell_num = doc["set"]["cell"];
+    cell_num = doc["set"]["cell"].as<int>();
+#if DEBUG_SERIAL >= 2
+    PRINTF("set cell: %d\n", cell_num);
+#endif
   }
   if (doc["set"].containsKey("balance")){
-    balancer.setState(doc["set"]["balance"]);
+    bool balance = !(doc["set"]["balance"] == "false");
+    balancer.setState(balance);
+#if DEBUG_SERIAL >= 2
+    PRINTF("set balance: %d\n", balance);
+#endif
   }
+  PRINTF("========================")
   return;
 }
+
 
 void newConnectionCallback(uint32_t nodeId) {
 #ifdef DEBUG_LED
@@ -193,8 +246,10 @@ void newConnectionCallback(uint32_t nodeId) {
 #endif
 
 #if DEBUG_SERIAL >= 1
-  PRINTF("--> startHere: New Connection, nodeId = %u\n", nodeId);
-  PRINTF("--> startHere: New Connection, %s\n", mesh.subConnectionJson(true).c_str());
+  PRINTF("=================\nNew Connection\n");
+  PRINTF("nodeId = %u\n", nodeId);
+  PRINTF("%s\n", mesh.subConnectionJson(true).c_str());
+  PRINTF("=================\n");
 #endif
 }
 
@@ -210,7 +265,8 @@ void changedConnectionCallback() {
 #endif
 
 #if DEBUG_SERIAL >= 1
-  PRINTF("Changed connections\n");
+  // List all nodes
+  PRINTF("=================\nChanged connections\n");
   PRINTF("Num nodes: %d\n", nodes.size());
   PRINTF("Connection list:");
 
@@ -219,7 +275,7 @@ void changedConnectionCallback() {
     PRINTF(" %u", *node);
     node++;
   }
-  PRINTF("\n");
+  PRINTF("\n=================\n");
 #endif
 
   calc_delay = true;
@@ -252,11 +308,14 @@ enum VoltageReadState {
 VoltageReadState readState = INITIAL;
 unsigned long lastTime;
 bool balancer_state;
+bool threshold_flag;
+float voltage = 0.0f;
 
 void readVoltageAsync() {
   unsigned long currentTime = millis();
 
   switch (readState) {
+    // Initial state, set the balancer to off and wait for voltage to settle
     case INITIAL:
       balancer_state = balancer.getState();
       if (balancer_state == true){
@@ -268,21 +327,36 @@ void readVoltageAsync() {
       lastTime = currentTime;
       break;
 
+    // Wait for voltage to settle if balancer was on
     case DELAY:
       if (currentTime - lastTime >= VOLTAGE_SETTLE_DELAY) {
         readState = READ;
       }
       break;
 
+    // Read the voltage and if it is above max or below threshold, turn on balancer
     case READ:
-      cell_voltage.readVoltage();
+      voltage = cell_voltage.readVoltage();
+      if (voltage >= BATTERY_VOLTAGE_MAX || threshold_flag == true){
+        if (voltage <= (BATTERY_MAX_THRESHOLD - BATTERY_VOLTAGE_MAX) ) {
+          threshold_flag = false;
+          balancer_state = false;
+        }
+        else{
+          threshold_flag = true;
+          balancer_state = true;
+        }
+      }
       readState = RESTORE;
       break;
 
+    // Restore the balancer state and wait for the next read
     case RESTORE:
       balancer.setState(balancer_state);
-      readState = INITIAL;
+      readState = WAIT;
       break;
+
+    // Wait for the next read
     case WAIT:
       if (currentTime - lastTime >= READ_VOLTAGE_INTERVAL * 1000) {
         readState = INITIAL;

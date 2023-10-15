@@ -36,6 +36,7 @@ public:
     {
         this->_pin = pin;
         this->_inverted = inverted;
+        this->_lastState = false;
     };
 
     void begin() { pinMode(this->_pin, OUTPUT); };

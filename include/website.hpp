@@ -1,5 +1,5 @@
-#ifndef IO_H_
-#define IO_H_
+#ifndef WEBSITE_H_
+#define WEBSITE_H_
 #include <Arduino.h>
 #include <ArduinoJson.h>
 
@@ -13,9 +13,7 @@
 
 //==============================================================================
 
-#if defined(ESP8266) || defined(ESP32)
-#include <EEPROM.h>
-#define EEPROM_ENABLED
+
 #endif
 #ifndef DEBUG_VD
 #define DEBUG_VD 0
@@ -24,7 +22,7 @@
 #define PRINTF(...) { Serial.printf(__VA_ARGS__); }
 #endif
 
-class VoltageDivider
+class Webserver
 {
 private:
 	int _pin;
@@ -62,11 +60,7 @@ public:
 	void begin() { 
 	pinMode(this->_pin, INPUT); 
 #if DEBUG_VD > 0
-	PRINTF("\n=== VoltageDivider ===\npin: %d\nvin: %f\ncalibrationOffset: %f\ncalibrationScale: %f\neepromAddress: %s\n", _pin, _vin, _calibrationOffset, _calibrationScale, _eepromAddress == -1 ? "NULL" : String(_eepromAddress).c_str());
-#endif
-	loadCalibration();
-#if DEBUG_VD > 0
-	PRINTF("=== End VoltageDivider ===\n");
+	PRINTF("=== VoltageDivider ===\npin: %d\nvin: %f\ncalibrationOffset: %f\ncalibrationScale: %f\neepromAddress: %s\n=== End VoltageDivider ===\n", _pin, _vin, _calibrationOffset, _calibrationScale, _eepromAddress == -1 ? "NULL" : String(_eepromAddress).c_str());
 #endif
 	};
 
@@ -92,8 +86,7 @@ public:
 		EEPROM.put(this->_eepromAddress, this->_calibrationOffset);
 		EEPROM.put(this->_eepromAddress + sizeof(float), this->_calibrationScale);
 #if DEBUG_VD >= 2
-		PRINTF("EEPROM: Saved calibration data to EEPROM address %d\nValues are: ", this->_eepromAddress);
-		PRINTF("Offset: %f, Scale: %f\n", this->_calibrationOffset, this->_calibrationScale);
+		PRINTF("Saved calibration data to EEPROM address %d\n", this->_eepromAddress);
 #endif
 	};
 
@@ -103,8 +96,7 @@ public:
 		EEPROM.get(this->_eepromAddress, this->_calibrationOffset);
 		EEPROM.get(this->_eepromAddress + sizeof(float), this->_calibrationScale);
 #if DEBUG_VD >= 2
-		PRINTF("EEPROM: Loaded calibration data from EEPROM address %d\nValues are: ", this->_eepromAddress);
-		PRINTF("EEPROM: Offset: %f, Scale: %f\n", this->_calibrationOffset, this->_calibrationScale);
+		PRINTF("Loaded calibration data from EEPROM address %d\n", this->_eepromAddress);
 #endif
 	};
 #endif
@@ -134,7 +126,7 @@ public:
 		float scaledVoltage = (float)raw / 1023.0 * _vin;
 		float calibratedVoltage = (scaledVoltage + _calibrationOffset) * _calibrationScale;
 #if DEBUG_VD >= 2
-		PRINTF("READ: Raw: %d, Scaled: %f, Calibrated: %f\n", raw, scaledVoltage, calibratedVoltage);
+		PRINTF("Raw: %d\nScaled: %f\nCalibrated: %f\n", raw, scaledVoltage, calibratedVoltage);
 #endif
 		_lastVoltage = calibratedVoltage;
 		return calibratedVoltage;
