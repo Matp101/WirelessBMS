@@ -1,7 +1,7 @@
 //TOOD: EEPROM for calibration values and cell number
 
-//\#define SLAVE
-#ifdef SLAVE
+//\#define CHILD
+#ifdef CHILD
 #include <Arduino.h>
 #include <painlessMesh.h>
 #include <ArduinoJson.h>

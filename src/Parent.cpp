@@ -1,10 +1,9 @@
 // TODO:
-//  Add website
 //  Add on connection, set cell number (save node_id to eeprom)
-//  if device disconnects, when reconnect, send info
-//  remove
+//  SDcard logging
+//  add algorithm for soc
 
-#ifdef MASTER
+#ifdef PARENT
 #include <Arduino.h>
 #include <painlessMesh.h>
 #include <ArduinoJson.h>
@@ -43,12 +42,18 @@ SimpleList<uint32_t> nodes;
 
 IPAddress getlocalIP();
 AsyncWebServer server(80);
-IPAddress myIP(0, 0, 0, 0);
-IPAddress myAPIP(0, 0, 0, 0);
+//IPAddress myIP(0, 0, 0, 0);
+IPAddress myAPIP(IP_ADDRESS);
 
 ACS712 current_sensor(CURRENT_SENSOR_TYPE, CURRENT_SENSOR_PIN);
 
 std::map<uint32_t, String> nodeData; // NodeID -> JSON data
+
+// Parent 
+float parent_voltage = 0.0f;
+float parent_voltage_nodes = 0.0f;
+float parent_current = 0.0f;
+float parent_soc = 0.0f;
 
 
 #ifdef DEBUG_LED
@@ -247,6 +252,38 @@ void delayReceivedCallback(uint32_t from, int32_t delay)
 #endif
 }
 
+float getVoltageNodes(){
+  parent_voltage_nodes = 0.0f;
+  for (auto &node : nodeData){
+    //deserialize json and get voltage and add them all
+    DynamicJsonDocument doc(256);
+    deserializeJson(doc, node.second);
+    parent_voltage_nodes += doc["cell"]["v"].as<float>();
+  }
+  return parent_voltage_nodes;
+}
+
+//TODO
+float getVoltageRead(){
+  parent_voltage = 0.0f;
+  return parent_voltage;
+}
+
+float getCurrent(){
+  parent_current = current_sensor.getCurrentDC();
+  return parent_current;
+}
+
+//TODO
+float getSOC(){
+  parent_soc = 0.0f;
+  return parent_soc;
+}
+
+void calibrateCurrent(){
+  current_sensor.calibrate();
+}
+
 //==========================================================================================
 const PROGMEM char* WEBSITE_HTML = R"html(
 <html>
@@ -292,7 +329,19 @@ const PROGMEM char* WEBSITE_HTML = R"html(
                         sdDiv.innerHTML = '<p style="text-align: center; justify-content: center;">Not currently writing to sd output</p>';
                     }
                 });
-        }
+          }
+
+          function updateParent(){
+              fetch('/parent')
+                  .then(response => response.json())
+                  .then(data => {
+                      // Assuming data structure is {v: voltage, c: current, s: soc, vn: voltageNodes}
+                      document.getElementById('p_v').textContent = data.v;
+                      document.getElementById('p_vn').textContent = data.vn;
+                      document.getElementById('p_c').textContent = data.c;
+                      document.getElementById('p_s').textContent = data.s;
+                  });
+          }
 
         // Fetch nodes data on page load
         window.onload = fetchNodesData;
@@ -318,13 +367,17 @@ const PROGMEM char* WEBSITE_HTML = R"html(
             <thead>
                 <tr>
                     <th><strong>Voltage (V)</strong></th>
+                    <th><strong>Voltage Nodes(V)</strong></th>
                     <th><strong>Current (mah)</strong></th>
+                    <th><strong>SOC</strong></th>
                 </tr>
             </thead>
             <tbody>
                 <tr>
-                    <th>0</th>
-                    <th>0</th>
+                    <th id="p_v">0</th>
+                    <th id="p_vn">0</th>
+                    <th id="p_c">0</th>
+                    <th id="p_s">0</th>
                 </tr>
             </tbody>
         </table>
@@ -389,6 +442,12 @@ void webserver() {
         static bool sdStatus = false;
         sdStatus = !sdStatus;
         String response = String("{\"sdStatus\":") + (sdStatus ? "true" : "false") + "}";
+        request->send(200, "application/json", response);
+    });
+
+
+    server.on("/parent", HTTP_GET, [](AsyncWebServerRequest *request) {
+        String response = String("{\"v\":") + getVoltageRead() + ",\"c\":" + getCurrent() + ",\"s\":" + getSOC() + ",\"vn\":" + getVoltageNodes() + "}";
         request->send(200, "application/json", response);
     });
 
