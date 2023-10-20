@@ -32,9 +32,12 @@
 #define BATTERY_VOLTAGE_PIN 0       // Pin to read the battery voltage from
 #define BATTERY_VOLTAGE_MAX 4.2f    // Maximum voltage of the battery
 #define BATTERY_MAX_THRESHOLD 0.05f // Battery has to fall below BATTERY_VOLTAGE_MAX minus this to turn off balancer
-//Update interval
+// Update interval
 #define UPDATE_INTERVAL 1           // seconds, how often to send data
 #define READ_VOLTAGE_INTERVAL 1     // seconds, how often to update the voltage
 #define VOLTAGE_SETTLE_DELAY 5000   // milliseconds, how long to wait for voltage to settle once balancer is turned off 
+// EEPROM
+#define EEPROM_SIZE 128
+#define EEPROM_START 0
 // Information
 int cell_num = 0;                   // cell number, 0-indexed

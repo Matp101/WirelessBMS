@@ -1,10 +1,11 @@
 //TOOD: EEPROM for calibration values and cell number
 
-//\#define CHILD
+//#define CHILD
 #ifdef CHILD
 #include <Arduino.h>
 #include <painlessMesh.h>
 #include <ArduinoJson.h>
+#include <EEPROM.h>
 
 #include "config.h"
 #include "adv_config.h"
@@ -19,6 +20,14 @@
 #define LED LED_BUILTIN
 #endif
 
+struct EEPROM_Data{
+  float version;
+  int reserved1;
+  int reserved2;
+  int cell_number;
+  float voltage_offset;
+  float voltage_scale;
+};
 
 
 // Prototypes
@@ -29,6 +38,7 @@ void changedConnectionCallback();
 void nodeTimeAdjustedCallback(int32_t offset); 
 void delayReceivedCallback(uint32_t from, int32_t delay);
 void readVoltageAsync();
+void saveEEPROM();
 
 Scheduler     userScheduler; // to control your personal task
 painlessMesh  mesh;
@@ -46,15 +56,30 @@ Task blinkNoNodes;
 bool onFlag = false;
 #endif
 
-VoltageDivider cell_voltage(BATTERY_VOLTAGE_PIN, BATTERY_VOLTAGE_MAX, BATTERY_VOLTAGE_CALIBRATION_OFFSET, BATTERY_VOLTAGE_CALIBRATION_SCALE, VOLTAGE_DIVIDER_EEPROM_ADDRESS);
+VoltageDivider cell_voltage(BATTERY_VOLTAGE_PIN, BATTERY_VOLTAGE_MAX, BATTERY_VOLTAGE_CALIBRATION_OFFSET, BATTERY_VOLTAGE_CALIBRATION_SCALE);
 Balancer balancer(BALANCER_PIN, BALANCER_INVERTED);
 
 uint32_t main_node = 0;
 
+EEPROM_Data eeprom_data;
+
 void setup() {
   Serial.begin(115200);
-  
-  cell_voltage.begin();
+
+  EEPROM.begin(EEPROM_SIZE);
+  EEPROM.get(EEPROM_START, eeprom_data);
+
+  if(eeprom_data.version != VERSION){
+    for(int i = 0; i < EEPROM_SIZE; i++){
+      EEPROM.put(0, 0);
+    }
+    eeprom_data.voltage_offset = BATTERY_VOLTAGE_CALIBRATION_OFFSET;
+    eeprom_data.voltage_scale = BATTERY_VOLTAGE_CALIBRATION_SCALE;
+    eeprom_data.cell_number = 0;
+    eeprom_data.version = VERSION;
+  }
+
+  cell_voltage.begin(eeprom_data.voltage_offset, eeprom_data.voltage_scale);
   cell_voltage.setAnalogClockDivider(ADC_CLOCK_DIV_16); //ONLY FOR ESP32
 
   balancer.begin();
@@ -203,24 +228,36 @@ void receivedCallback(uint32_t from, String & msg) {
     return;
   }
   PRINTF("=== Changed Settings ===")
-  
+
+  bool changed_settings = false;
   //if main esp is talking to this node //set:cell:voltage_calibration_offset
   if (doc["set"].containsKey("cal_offset")){
     float offset = doc["set"]["cal_offset"].as<float>();
-    cell_voltage.setCalibrationOffset(offset);
+    bool flag = cell_voltage.setCalibrationOffset(offset);
+    if (flag == true){
+      changed_settings = true;
+    }
 #if DEBUG_SERIAL >= 2
     PRINTF("set cal offset: %f\n", offset)
 #endif
   }
   if (doc["set"].containsKey("cal_scale")){
     float scale = doc["set"]["cal_scale"].as<float>();
-    cell_voltage.setCalibrationScale(scale);
+    bool flag = cell_voltage.setCalibrationScale(scale);
+    if (flag == true){
+      changed_settings = true;
+    }
+
 #if DEBUG_SERIAL >= 2
     PRINTF("set cal scale: %f\n", scale)
 #endif
   }
   if (doc["set"].containsKey("cell")){
-    cell_num = doc["set"]["cell"].as<int>();
+    int num = doc["set"]["cell"].as<int>();
+    if(num != cell_num){
+      cell_num = num;
+      changed_settings = true;
+    }
 #if DEBUG_SERIAL >= 2
     PRINTF("set cell: %d\n", cell_num);
 #endif
@@ -233,6 +270,9 @@ void receivedCallback(uint32_t from, String & msg) {
 #endif
   }
   PRINTF("========================")
+  if(changed_settings){
+    saveEEPROM();
+  }
   return;
 }
 
@@ -293,6 +333,12 @@ void delayReceivedCallback(uint32_t from, int32_t delay) {
 #endif
 }
 
+void saveEEPROM(){
+  eeprom_data.cell_number = cell_num;
+  eeprom_data.version = VERSION;
+  eeprom_data.voltage_offset = cell_voltage.getCalibrationOffset();
+  eeprom_data.voltage_scale = cell_voltage.getCalibrationScale();
+}
 
 
 // ==================== Voltage Read Async ====================

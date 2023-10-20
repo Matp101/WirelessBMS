@@ -10,6 +10,7 @@
 #include <ACS712.h>
 #include <ESPAsyncWebServer.h>
 
+
 #include "config.h"
 #include "adv_config.h"
 
@@ -280,8 +281,8 @@ float getSOC(){
   return parent_soc;
 }
 
-void calibrateCurrent(){
-  current_sensor.calibrate();
+int calibrateCurrent(){
+  return current_sensor.calibrate();
 }
 
 //==========================================================================================
@@ -335,12 +336,16 @@ const PROGMEM char* WEBSITE_HTML = R"html(
               fetch('/parent')
                   .then(response => response.json())
                   .then(data => {
-                      // Assuming data structure is {v: voltage, c: current, s: soc, vn: voltageNodes}
+                      // Structure is {v: voltage, c: current, s: soc, vn: voltageNodes}
                       document.getElementById('p_v').textContent = data.v;
                       document.getElementById('p_vn').textContent = data.vn;
                       document.getElementById('p_c').textContent = data.c;
                       document.getElementById('p_s').textContent = data.s;
                   });
+          }
+
+          function calibrateCurrent(){
+            fetch('/calibrateCurrent');
           }
 
         // Fetch nodes data on page load
@@ -381,6 +386,10 @@ const PROGMEM char* WEBSITE_HTML = R"html(
                 </tr>
             </tbody>
         </table>
+        <div id="sd" style="display: block ruby;">
+            <button id="sdbutton" class="button" onclick="calibrateCurrent()">Calibrate</button>
+            <p id="sd-status">Calibrate Current. When calibrating, make sure <strong>NO</strong> load is outputing</p>
+        </div>
         <br>
         <div id="sd" style="display: block ruby;">
             <button id="sdbutton" class="button" onclick="toggleSDwrite()">SD Card write</button>
@@ -449,6 +458,11 @@ void webserver() {
     server.on("/parent", HTTP_GET, [](AsyncWebServerRequest *request) {
         String response = String("{\"v\":") + getVoltageRead() + ",\"c\":" + getCurrent() + ",\"s\":" + getSOC() + ",\"vn\":" + getVoltageNodes() + "}";
         request->send(200, "application/json", response);
+    });
+
+    server.on("/calibrateCurrent", [](AsyncWebServerRequest *request) {
+      String response = String(calibrateCurrent());
+      request->send(200, "application/json", response);
     });
 
     server.begin();
