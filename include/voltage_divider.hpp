@@ -13,10 +13,6 @@
 
 //==============================================================================
 
-#if defined(ESP8266) || defined(ESP32)
-#include <EEPROM.h>
-#define EEPROM_ENABLED
-#endif
 #ifndef DEBUG_VD
 #define DEBUG_VD 0
 #endif
@@ -31,7 +27,6 @@ private:
 	float _vin; // Input voltage
 	float _calibrationOffset;
 	float _calibrationScale;
-	int _eepromAddress; // Address in EEPROM to store calibration data
 	float _lastVoltage;
 #ifdef ESP32
 	int _anologClockDivider = 1;
@@ -43,28 +38,23 @@ public:
 	// vin: Input voltage (default 5.0)
 	// calibrationOffset: Offset to add to voltage (default 0.0)
 	// calibrationScale: Scale to multiply voltage by (default 1.0)
-	// eepromAddress: Address in EEPROM to store calibration data (default NULL)
-	VoltageDivider(int pin, float vin = 4.2, float calibrationOffset = 0.0, float calibrationScale = 1.0, int eepromAddress = -1)
+	VoltageDivider(int pin, float vin = 4.2f, float calibrationOffset = 0.0f, float calibrationScale = 1.0f)
 	{
 		this->_pin = pin;
 		this->_vin = vin;
-		this->_eepromAddress = eepromAddress; // No EEPROM address set
 		this->_calibrationOffset = calibrationOffset;
 		this->_calibrationScale = calibrationScale;
-#ifdef EEPROM_ENABLED
-		if (eepromAddress != -1)
-		{
-			loadCalibration();
-		}
-#endif
 	};
 
-	void begin() { 
+	void begin(float calibrationOffset = 0.0f, float calibrationScale = 1.0f) { 
+		if (calibrationOffset != this->_calibrationOffset)
+			this->_calibrationOffset = calibrationOffset;
+		if (calibrationScale != this->_calibrationScale)
+			this->_calibrationScale = calibrationScale;
 	pinMode(this->_pin, INPUT); 
 #if DEBUG_VD > 0
-	PRINTF("\n=== VoltageDivider ===\npin: %d\nvin: %f\ncalibrationOffset: %f\ncalibrationScale: %f\neepromAddress: %s\n", _pin, _vin, _calibrationOffset, _calibrationScale, _eepromAddress == -1 ? "NULL" : String(_eepromAddress).c_str());
+	PRINTF("\n=== VoltageDivider ===\npin: %d\nvin: %f\ncalibrationOffset: %f\ncalibrationScale: %f\n", _pin, _vin, _calibrationOffset, _calibrationScale);
 #endif
-	loadCalibration();
 #if DEBUG_VD > 0
 	PRINTF("=== End VoltageDivider ===\n");
 #endif
@@ -78,44 +68,10 @@ public:
 #endif
 	};
 
-#ifdef EEPROM_ENABLED
-	// Set EEPROM address to store calibration data
-	void setEEPROMAddress(int address)
-	{
-		this->_eepromAddress = address;
-		saveCalibration();
-	};
-
-	// Save calibration data to EEPROM
-	void saveCalibration()
-	{
-		EEPROM.put(this->_eepromAddress, this->_calibrationOffset);
-		EEPROM.put(this->_eepromAddress + sizeof(float), this->_calibrationScale);
-#if DEBUG_VD >= 2
-		PRINTF("EEPROM: Saved calibration data to EEPROM address %d\nValues are: ", this->_eepromAddress);
-		PRINTF("Offset: %f, Scale: %f\n", this->_calibrationOffset, this->_calibrationScale);
-#endif
-	};
-
-	// Load calibration data from EEPROM
-	void loadCalibration()
-	{
-		EEPROM.get(this->_eepromAddress, this->_calibrationOffset);
-		EEPROM.get(this->_eepromAddress + sizeof(float), this->_calibrationScale);
-#if DEBUG_VD >= 2
-		PRINTF("EEPROM: Loaded calibration data from EEPROM address %d\nValues are: ", this->_eepromAddress);
-		PRINTF("EEPROM: Offset: %f, Scale: %f\n", this->_calibrationOffset, this->_calibrationScale);
-#endif
-	};
-#endif
-
 	void clearCalibration()
 	{
 		this->_calibrationOffset = 0.0;
 		this->_calibrationScale = 1.0;
-#ifdef EEPROM_ENABLED
-		saveCalibration();
-#endif
 	};
 
 	// Get calibration offset
@@ -144,21 +100,23 @@ public:
 	float getLastVoltage() { return _lastVoltage; };
 
 	// Setter for calibration offset
-	void setCalibrationOffset(float offset)
+	bool setCalibrationOffset(float offset)
 	{
-		this->_calibrationOffset = offset;
-#ifdef EEPROM_ENABLED
-		saveCalibration();
-#endif
+		if(offset != this->_calibrationOffset){
+			this->_calibrationOffset = offset;
+			return true;
+		}
+		return false;
 	};
 
 	// Setter for calibration scale
-	void setCalibrationScale(float scale)
+	bool setCalibrationScale(float scale)
 	{
-		this->_calibrationScale = scale;
-#ifdef EEPROM_ENABLED
-		saveCalibration();
-#endif
+		if(scale != this->_calibrationScale){
+			this->_calibrationScale = scale;
+			return true;
+		}
+		return false;
 	};
 };
 
