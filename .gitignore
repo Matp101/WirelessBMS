@@ -3,3 +3,9 @@
 .vscode/c_cpp_properties.json
 .vscode/launch.json
 .vscode/ipch
+
+lib/EEPROM
+lib/ArduinoOTA
+old/
+lib/SD
+lib/SD_MMC

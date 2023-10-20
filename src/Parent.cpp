@@ -336,6 +336,7 @@ const PROGMEM char* WEBSITE_HTML = R"html(
               fetch('/parent')
                   .then(response => response.json())
                   .then(data => {
+                      // Structure is {v: voltage, c: current, s: soc, vn: voltageNodes}
                       document.getElementById('p_v').textContent = data.v;
                       document.getElementById('p_vn').textContent = data.vn;
                       document.getElementById('p_c').textContent = data.c;
