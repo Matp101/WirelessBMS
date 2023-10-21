@@ -2,6 +2,7 @@
 //  Add on connection, set cell number (save node_id to eeprom)
 //  SDcard logging
 //  add algorithm for soc
+//  https://randomnerdtutorials.com/esp32-microsd-card-arduino/
 
 #ifdef PARENT
 #include <Arduino.h>
@@ -36,14 +37,12 @@ void webserver();
 
 Scheduler userScheduler; // to control your personal task
 painlessMesh mesh;
-// Task taskSendMessage(TASK_SECOND * 1, TASK_FOREVER, &sendMessage ); // start with a one second interval
 
 bool calc_delay = false;
 SimpleList<uint32_t> nodes;
 
 IPAddress getlocalIP();
 AsyncWebServer server(80);
-//IPAddress myIP(0, 0, 0, 0);
 IPAddress myAPIP(IP_ADDRESS);
 
 ACS712 current_sensor(CURRENT_SENSOR_TYPE, CURRENT_SENSOR_PIN);
@@ -74,7 +73,7 @@ void setup()
 #endif
 
   // setup wifi mesh
-  mesh.setDebugMsgTypes(ERROR | STARTUP | DEBUG); // set before init() so that you can see error messages
+  mesh.setDebugMsgTypes(ERROR | STARTUP | DEBUG);
   mesh.init(MESH_SSID, MESH_PASSWORD, &userScheduler, MESH_PORT, WIFI_AP_STA, 6);
   mesh.onReceive(&receivedCallback);
 
