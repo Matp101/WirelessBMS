@@ -11,6 +11,9 @@
 #include <ACS712.h>
 #include <ESPAsyncWebServer.h>
 
+#include <SPI.h>
+#include <SD.h>
+
 
 #include "config.h"
 #include "adv_config.h"
@@ -285,72 +288,11 @@ int calibrateCurrent(){
 }
 
 //==========================================================================================
+
 const PROGMEM char* WEBSITE_HTML = R"html(
 <html>
 
 <head>
-    <script>
-        function updateNodesTable(nodes) {
-            let tableContent = '';
-            nodes.forEach(node => {
-                tableContent += `<tr>
-                    <td>${node.cell}</td>
-                    <td>${node.id}</td>
-                    <td>${node.sn}</td>
-                    <td>${node.voltage}</td>
-                    <td>${node.voltageRaw}</td>
-                    <td>${node.state}</td>
-                    <td>${node.calibrationOffset}</td>
-                    <td>${node.calibrationScale}</td>
-                    <td>${node.freeHeapMemory}</td>
-                </tr>`;
-            });
-            document.getElementById('nodes-table').innerHTML = tableContent;
-        }
-
-        function fetchNodesData() {
-            fetch('/getNodes')
-                .then(response => response.json())
-                .then(data => {
-                    updateNodesTable(data.nodes);
-                });
-        }
-
-        function toggleSDwrite() {
-            fetch('/toggleSD')
-                .then(response => response.json())
-                .then(data => {
-                    const sdDiv = document.getElementById('sd-color');
-                    if (data.sdStatus) {
-                        sdDiv.style.backgroundColor = 'green';
-                        sdDiv.innerHTML = '<p style="text-align: center; justify-content: center;">Writing to sd output</p>';
-                    } else {
-                        sdDiv.style.backgroundColor = 'red';
-                        sdDiv.innerHTML = '<p style="text-align: center; justify-content: center;">Not currently writing to sd output</p>';
-                    }
-                });
-          }
-
-          function updateParent(){
-              fetch('/parent')
-                  .then(response => response.json())
-                  .then(data => {
-                      // Structure is {v: voltage, c: current, s: soc, vn: voltageNodes}
-                      document.getElementById('p_v').textContent = data.v;
-                      document.getElementById('p_vn').textContent = data.vn;
-                      document.getElementById('p_c').textContent = data.c;
-                      document.getElementById('p_s').textContent = data.s;
-                  });
-          }
-
-          function calibrateCurrent(){
-            fetch('/calibrateCurrent');
-          }
-
-        // Fetch nodes data on page load
-        window.onload = fetchNodesData;
-    </script>
-
     <style>
         table,
         th,
@@ -358,12 +300,21 @@ const PROGMEM char* WEBSITE_HTML = R"html(
             border: 1px solid black;
             border-collapse: collapse;
         }
+
+        p {
+            margin: 0px;
+        }
     </style>
 </head>
 
 <body>
     <div id="sd-color" style="width: 100%; height: 20px; background-color: red;">
         <p style="text-align: center; justify-content: center;">Not currently writing to sd output</p>
+    </div>
+    <div>
+        <br>
+        <label for="interval">Update interval (seconds):</label>
+        <input type="number" id="interval" min="1" value="5">
     </div>
     <div id="parent">
         <h2>Parent</h2>
@@ -389,6 +340,7 @@ const PROGMEM char* WEBSITE_HTML = R"html(
             <button id="sdbutton" class="button" onclick="calibrateCurrent()">Calibrate</button>
             <p id="sd-status">Calibrate Current. When calibrating, make sure <strong>NO</strong> load is outputing</p>
         </div>
+
         <br>
         <div id="sd" style="display: block ruby;">
             <button id="sdbutton" class="button" onclick="toggleSDwrite()">SD Card write</button>
@@ -406,17 +358,179 @@ const PROGMEM char* WEBSITE_HTML = R"html(
                     <th>SN</th>
                     <th>Voltage (V)</th>
                     <th>Voltage Raw</th>
-                    <th>State</th>
+                    <th>Balance State</th>
                     <th>Calibration Offset</th>
                     <th>Calibration Scale</th>
                     <th>Free Heap Memory</th>
+                    <th>Actions</th>
                 </tr>
             </thead>
-            <tbody id="nodes-table">
-                <!-- Filled dynamically via JavaScript -->
-            </tbody>
+            <tbody id="nodes-table"></tbody>
         </table>
     </div>
+
+    <script>
+        let isEditing = false;
+
+        function updateNodesTable(nodes) {
+            if (isEditing) return;
+            let tableContent = '';
+            nodes.forEach(node => {
+                tableContent += `<tr id="row${node.info.id}">
+		            <td>
+						<p id="cell-${node.info.id}">${node.info.cell}</p>
+		            	<input type="number" value="${node.info.cell}" id="cell-edit-${node.info.id}" style="display:none"/>
+					</td>
+		            <td>${node.info.id}</td>
+		            <td>${node.info.sn}</td>
+		            <td>${node.cell.v}</td>
+		            <td>${node.cell.v_raw}</td>
+		            <td>${node.bal.state}</td>
+		            <td>
+						<p id="offset-${node.info.id}">${node.cell.cal_offset}</p>
+						<input type="number" value="${node.cell.cal_offset}" id="offset-edit-${node.info.id}" style="display:none"/>
+					</td>
+		            <td>
+						<p id="scale-${node.info.id}">${node.cell.cal_scale}</p>
+						<input type="number" value="${node.cell.cal_scale}" id="scale-edit-${node.info.id}" style="display:none"/>
+					</td>
+		            <td>${node.info.free_mem}</td>
+					<td>
+                        <button id="edit-${node.info.id}" onclick="enableEditing(${node.info.id})">Edit</button>
+                        <button id="submit-${node.info.id}" onclick="submitChanges(${node.info.id})" style="display:none;">Submit</button>
+                        <button id="cancel-${node.info.id}" onclick="cancelEdit(${node.info.id})" style="display:none;">Cancel</button>
+                    </td>
+                </tr>`;
+            });
+            document.getElementById('nodes-table').innerHTML = tableContent;
+
+            updateParent();
+        }
+
+        function fetchNodesData() {
+            fetch('/getNodes')
+                .then(response => response.json())
+                .then(data => {
+                    updateNodesTable(data.nodes);
+                });
+        }
+
+        function toggleSDwrite() {
+            fetch('/toggleSD')
+                .then(response => response.json())
+                .then(data => {
+                    const sdDiv = document.getElementById('sd-color');
+                    if (data.sdStatus) {
+                        sdDiv.style.backgroundColor = 'green';
+                        sdDiv.innerHTML = '<p style="text-align: center; justify-content: center;">Writing to sd output</p>';
+                    } else {
+                        sdDiv.style.backgroundColor = 'red';
+                        sdDiv.innerHTML = '<p style="text-align: center; justify-content: center;">Not currently writing to sd output</p>';
+                    }
+                });
+        }
+
+        // Fetch nodes data on page load
+        window.onload = fetchNodesData;
+
+        let currentInterval;
+
+        document.getElementById('interval').addEventListener('change', function () {
+            // Clear the existing interval
+            if (currentInterval) {
+                clearInterval(currentInterval);
+            }
+
+            // Set the new interval based on the input value
+            const milliseconds = this.value * 1000;
+            currentInterval = setInterval(fetchNodesData, milliseconds);
+            console.log('changed to ' + document.getElementById('interval').value * 1000)
+        });
+
+        // Set the initial interval when the page loads
+        currentInterval = setInterval(fetchNodesData, document.getElementById('interval').value * 1000);
+
+        function submitChanges(nodeId) {
+            // 1. Grab the current values of the editable cells for a given node.
+            let cellValue = document.getElementById(`cell-edit-${nodeId}`).value;
+            let offsetValue = document.getElementById(`offset-edit-${nodeId}`).value;
+            let scaleValue = document.getElementById(`scale-edit-${nodeId}`).value;
+
+            // Construct the data payload to send
+            let data = {
+                set: {
+                    node_id: nodeId,
+                    cell: parseInt(cellValue),
+                    callibration_offset: parseFloat(offsetValue),
+                    callibration_scale: parseFloat(scaleValue)
+                }
+            };
+
+            // 2. Send those values to the server
+            fetch('/updateNode', {
+                method: 'POST',
+                headers: {
+                    'Content-Type': 'application/json',
+                },
+                body: JSON.stringify(data),
+            })
+                .then(response => response.json())
+                .then(data => {
+                    // Handle server response
+                    console.log(data);
+                })
+                .catch((error) => {
+                    console.error('Error:', error);
+                });
+
+            isEditing = false;
+            fetchNodesData();
+        }
+
+
+        function enableEditing(nodeId) {
+            isEditing = true;
+            let rowToEdit = document.getElementById(`row${nodeId}`);
+            let cells = rowToEdit.querySelectorAll("td");
+
+            document.getElementById(`edit-${nodeId}`).style.display = 'none';
+            document.getElementById(`submit-${nodeId}`).style.display = 'inline-block';
+            document.getElementById(`cancel-${nodeId}`).style.display = 'inline-block';
+
+            document.getElementById(`cell-edit-${nodeId}`).style.display = 'inline-block';
+            document.getElementById(`offset-edit-${nodeId}`).style.display = 'inline-block';
+            document.getElementById(`scale-edit-${nodeId}`).style.display = 'inline-block';
+            document.getElementById(`cell-${nodeId}`).style.display = 'none';
+            document.getElementById(`offset-${nodeId}`).style.display = 'none';
+            document.getElementById(`scale-${nodeId}`).style.display = 'none';
+        }
+
+        function cancelEdit(nodeId) {
+            isEditing = false;
+            let rowToEdit = document.getElementById(`row${nodeId}`);
+            let cells = rowToEdit.querySelectorAll("td");
+            fetchNodesData();  // Reloads original data
+            document.getElementById(`edit-${nodeId}`).style.display = 'inline-block';
+            document.getElementById(`submit-${nodeId}`).style.display = 'none';
+            document.getElementById(`cancel-${nodeId}`).style.display = 'none';
+        }
+
+        function updateParent() {
+            fetch('/parent')
+                .then(response => response.json())
+                .then(data => {
+                    // Structure is {v: voltage, c: current, s: soc, vn: voltageNodes}
+                    document.getElementById('p_v').textContent = data.v;
+                    document.getElementById('p_vn').textContent = data.vn;
+                    document.getElementById('p_c').textContent = data.c;
+                    document.getElementById('p_s').textContent = data.s;
+                });
+        }
+
+        function calibrateCurrent() {
+            fetch('/calibrateCurrent');
+        }
+    </script>
 </body>
 
 </html>
@@ -463,6 +577,49 @@ void webserver() {
       String response = String(calibrateCurrent());
       request->send(200, "application/json", response);
     });
+
+    server.on(
+		"/updateNode", HTTP_POST, [](AsyncWebServerRequest *request)
+		{
+		},
+		NULL, [](AsyncWebServerRequest *request, uint8_t *data, size_t len, size_t index, size_t total)
+		{
+    // Only handling the data when the entire payload has been received
+    if(index + len == total){
+      	// Convert the received data to a readable string.
+      	String reqBody = String((char*)data).substring(index, index+len);
+        PRINTF("DATA: %s\n", reqBody.c_str());
+
+		//send single message
+		//{"set":{"node_id":434116965,"cell":1,"callibration_offset":0,"callibration_scale":1}}
+		StaticJsonDocument<256> rec_doc;
+		DeserializationError error = deserializeJson(rec_doc, reqBody.c_str());
+		if (error) {
+			#if DEBUG_SERIAL >= 1
+    		PRINTF("deserializeJson() failed: %s\n", error.c_str());
+			#endif
+    		return;
+ 	 	}
+
+		DynamicJsonDocument send_doc(256);
+		send_doc["info"]["cell"] = 0;
+		send_doc["info"]["id"] = mesh.getNodeId();
+		send_doc["set"]["id"] = rec_doc["set"]["node_id"];
+		send_doc["set"]["cal_offset"] = rec_doc["set"]["callibration_offset"];
+		send_doc["set"]["cal_scale"] = rec_doc["set"]["callibration_scale"];
+		send_doc["set"]["cell"] = rec_doc["set"]["cell"];
+		send_doc["set"]["balance"] = false;
+		send_doc["set"]["led"] = false;
+
+		String jsonString;
+		serializeJson(send_doc, jsonString);
+		uint32_t nodeId = send_doc["set"]["id"].as<uint32_t>();
+		mesh.sendSingle(nodeId, jsonString);
+
+		PRINTF("SENDING (%d): %s\n", nodeId, jsonString)
+		PRINTF("~~~%s\n", send_doc)
+        
+    } });
 
     server.begin();
 }

@@ -17,7 +17,7 @@
 #define HOSTNAME "HTTP_BRIDGE"
 #define IP_ADDRESS 4,3,2,1
 // Current Sensor
-#define CURRENT_SENSOR_PIN 0            // Pin to read the current sensor from
+#define CURRENT_SENSOR_PIN 36            // Pin to read the current sensor from
 #define CURRENT_SENSOR_TYPE ACS712_30A // Type of current sensor, ACS712_05B, ACS712_20A, ACS712_30A
 // SD Card (SD CARD must be in FAT32 format)
 #define SD_CS_PIN 5                // Pin to use for SD card chip select
