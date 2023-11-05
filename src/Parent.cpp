@@ -1,7 +1,6 @@
 // TODO:
-//  Add on connection, set cell number (save node_id to eeprom)
+//  Add on connection, set cell number (save node_id to eeprom, save calibration)
 //  SDcard logging
-//  add algorithm for soc
 //  https://randomnerdtutorials.com/esp32-microsd-card-arduino/
 
 #ifdef PARENT
@@ -10,11 +9,12 @@
 #include <ArduinoJson.h>
 #include <ACS712.h>
 #include <ESPAsyncWebServer.h>
+#include <fuelgauge.hpp>
 
 #include <SPI.h>
 #include <SD.h>
 
-
+#include "batteries.h"
 #include "config.h"
 #include "adv_config.h"
 
@@ -28,6 +28,16 @@
 #define LED LED_BUILTIN
 #endif
 
+// Parent 
+struct Parent
+{
+  float voltage;
+  float voltage_nodes;
+  float current;
+  float soc;
+  float tt;
+};
+
 // Prototypes
 void sendMessage();
 void receivedCallback(uint32_t from, String &msg);
@@ -35,8 +45,16 @@ void newConnectionCallback(uint32_t nodeId);
 void changedConnectionCallback();
 void nodeTimeAdjustedCallback(int32_t offset);
 void delayReceivedCallback(uint32_t from, int32_t delay);
-void readVoltageAsync();
+float getVoltageNodes();
+float getVoltageRead();
+float getCurrent();
+float getSOC();
+float getTT();
+int calibrateCurrent();
+void updateValues();
 void webserver();
+
+Parent parent;
 
 Scheduler userScheduler; // to control your personal task
 painlessMesh mesh;
@@ -49,15 +67,11 @@ AsyncWebServer server(80);
 IPAddress myAPIP(IP_ADDRESS);
 
 ACS712 current_sensor(CURRENT_SENSOR_TYPE, CURRENT_SENSOR_PIN);
+FuelGauge fuel_gauge(BATTERY_NOMINAL_CAPACITY, BATTERY_INTERNAL_RESISTANCE, BATTERY_MAX_VOLTAGE, BATTERY_LOAD_CURRENT);
 
 std::map<uint32_t, String> nodeData; // NodeID -> JSON data
 
-// Parent 
-float parent_voltage = 0.0f;
-float parent_voltage_nodes = 0.0f;
-float parent_current = 0.0f;
-float parent_soc = 0.0f;
-
+bool fuel_gauge_initialized = false;
 
 #ifdef DEBUG_LED
 // Task to blink the number of nodes
@@ -123,12 +137,28 @@ void setup()
   server.begin();
 
 #endif
+
 }
 
+
+static unsigned long lastUpdate = 0;
 void loop()
 {
   // mesh connected
   mesh.update();
+
+  if(!fuel_gauge_initialized && getCurrent() == 0.0f){
+    PRINTF("Initializing Fuel Gauge\n");
+    fuel_gauge.initialize(getCurrent(), getVoltageRead(), &parent.soc, &parent.tt);
+    fuel_gauge_initialized = true;
+  }
+
+  //update current, voltage, soc, tt
+  if (millis() - lastUpdate > 1000)
+  {
+    lastUpdate = millis();
+    updateValues();
+  }
 
   // Blink LED if mesh is connected
 #ifdef DEBUG_LED
@@ -256,43 +286,56 @@ void delayReceivedCallback(uint32_t from, int32_t delay)
 }
 
 float getVoltageNodes(){
-  parent_voltage_nodes = 0.0f;
+  parent.voltage_nodes = 0.0f;
   for (auto &node : nodeData){
     //deserialize json and get voltage and add them all
     DynamicJsonDocument doc(256);
     deserializeJson(doc, node.second);
-    parent_voltage_nodes += doc["cell"]["v"].as<float>();
+    parent.voltage_nodes += doc["cell"]["v"].as<float>();
   }
-  return parent_voltage_nodes;
+  return parent.voltage_nodes;
 }
 
 //TODO
 float getVoltageRead(){
-  parent_voltage = 0.0f;
-  return parent_voltage;
+  parent.voltage = 0.0f;
+  return parent.voltage;
 }
 
 float getCurrent(){
-  parent_current = current_sensor.getCurrentDC();
-  return parent_current;
+  parent.current = current_sensor.getCurrentDC();
+  return parent.current;
 }
 
-//TODO
 float getSOC(){
-  parent_soc = 0.0f;
-  return parent_soc;
+  parent.soc = fuel_gauge.getSOC();
+  return parent.soc;
+}
+
+float getTT(){
+  parent.tt = fuel_gauge.getTTS();
+  return parent.tt;
 }
 
 int calibrateCurrent(){
+  fuel_gauge.initialize(0.0f, getVoltageRead(), &parent.soc, &parent.tt);
   return current_sensor.calibrate();
+}
+
+void updateValues(){
+  parent.voltage = getVoltageRead();
+  parent.voltage_nodes = getVoltageNodes();
+  parent.current = getCurrent();
+  parent.soc = getSOC();
+  parent.tt = getTT();
 }
 
 //==========================================================================================
 
 const PROGMEM char* WEBSITE_HTML = R"html(
 <html>
-
 <head>
+    <title>Wireless BMS</title>
     <style>
         table,
         th,
@@ -325,58 +368,63 @@ const PROGMEM char* WEBSITE_HTML = R"html(
                     <th><strong>Voltage Nodes(V)</strong></th>
                     <th><strong>Current (mah)</strong></th>
                     <th><strong>SOC</strong></th>
-                </tr>
-            </thead>
-            <tbody>
-                <tr>
-                    <th id="p_v">0</th>
-                    <th id="p_vn">0</th>
-                    <th id="p_c">0</th>
-                    <th id="p_s">0</th>
-                </tr>
-            </tbody>
-        </table>
-        <div id="sd" style="display: block ruby;">
-            <button id="sdbutton" class="button" onclick="calibrateCurrent()">Calibrate</button>
-            <p id="sd-status">Calibrate Current. When calibrating, make sure <strong>NO</strong> load is outputing</p>
+                    <th><strong>TTS</strong></th>
+                    </tr>
+                </thead>
+                <tbody>
+                    <tr>
+                        <td id="p_v">0</td>
+                        <td id="p_vn">0</td>
+                        <td id="p_c">0</td>
+                        <td id="p_s">0</td>
+                        <td id="p_tt">0</td>
+                    </tr>
+                </tbody>
+            </table>
+            <br>
+
+            <div id="calibrate" style="display: block ruby;">
+                <button id="calibratebutton" class="button" onclick="calibrateCurrent()">Calibrate</button>
+                <p id="calibrate-status">Calibrate Current. When calibrating, make sure <strong>NO</strong> load is outputing</p>
+            </div>
+    
+            <br>
+            <div id="sd" style="display: block ruby;">
+                <button id="sdbutton" class="button" onclick="toggleSDwrite()">SD Card write</button>
+                <p id="sd-status">SD card not found</p>
+            </div>
         </div>
-
-        <br>
-        <div id="sd" style="display: block ruby;">
-            <button id="sdbutton" class="button" onclick="toggleSDwrite()">SD Card write</button>
-            <p id="sd-status">SD card not found</p>
+    
+        <div id="nodes-info">
+            <h2>Nodes</h2>
+            <table cellpadding="5">
+                <thead>
+                    <tr>
+                        <th>Cell</th>
+                        <th>ID</th>
+                        <th>SN</th>
+                        <th>Voltage (V)</th>
+                        <th>Voltage Raw</th>
+                        <th>Balance State</th>
+                        <th>Calibration Offset</th>
+                        <th>Calibration Scale</th>
+                        <th>Free Heap Memory</th>
+                        <th>Actions</th>
+                    </tr>
+                </thead>
+                <tbody id="nodes-table"></tbody>
+            </table>
         </div>
-    </div>
+    
 
-    <div id="nodes-info">
-        <h2>Nodes</h2>
-        <table cellpadding="5">
-            <thead>
-                <tr>
-                    <th>Cell</th>
-                    <th>ID</th>
-                    <th>SN</th>
-                    <th>Voltage (V)</th>
-                    <th>Voltage Raw</th>
-                    <th>Balance State</th>
-                    <th>Calibration Offset</th>
-                    <th>Calibration Scale</th>
-                    <th>Free Heap Memory</th>
-                    <th>Actions</th>
-                </tr>
-            </thead>
-            <tbody id="nodes-table"></tbody>
-        </table>
-    </div>
+            <script>
+                let isEditing = false;
 
-    <script>
-        let isEditing = false;
-
-        function updateNodesTable(nodes) {
-            if (isEditing) return;
-            let tableContent = '';
-            nodes.forEach(node => {
-                tableContent += `<tr id="row${node.info.id}">
+                function updateNodesTable(nodes) {
+                    if (isEditing) return;
+                    let tableContent = '';
+                    nodes.forEach(node => {
+                        tableContent += `<tr id="row${node.info.id}">
 		            <td>
 						<p id="cell-${node.info.id}">${node.info.cell}</p>
 		            	<input type="number" value="${node.info.cell}" id="cell-edit-${node.info.id}" style="display:none"/>
@@ -401,136 +449,137 @@ const PROGMEM char* WEBSITE_HTML = R"html(
                         <button id="cancel-${node.info.id}" onclick="cancelEdit(${node.info.id})" style="display:none;">Cancel</button>
                     </td>
                 </tr>`;
-            });
-            document.getElementById('nodes-table').innerHTML = tableContent;
+                    });
+                    document.getElementById('nodes-table').innerHTML = tableContent;
 
-            updateParent();
-        }
-
-        function fetchNodesData() {
-            fetch('/getNodes')
-                .then(response => response.json())
-                .then(data => {
-                    updateNodesTable(data.nodes);
-                });
-        }
-
-        function toggleSDwrite() {
-            fetch('/toggleSD')
-                .then(response => response.json())
-                .then(data => {
-                    const sdDiv = document.getElementById('sd-color');
-                    if (data.sdStatus) {
-                        sdDiv.style.backgroundColor = 'green';
-                        sdDiv.innerHTML = '<p style="text-align: center; justify-content: center;">Writing to sd output</p>';
-                    } else {
-                        sdDiv.style.backgroundColor = 'red';
-                        sdDiv.innerHTML = '<p style="text-align: center; justify-content: center;">Not currently writing to sd output</p>';
-                    }
-                });
-        }
-
-        // Fetch nodes data on page load
-        window.onload = fetchNodesData;
-
-        let currentInterval;
-
-        document.getElementById('interval').addEventListener('change', function () {
-            // Clear the existing interval
-            if (currentInterval) {
-                clearInterval(currentInterval);
-            }
-
-            // Set the new interval based on the input value
-            const milliseconds = this.value * 1000;
-            currentInterval = setInterval(fetchNodesData, milliseconds);
-            console.log('changed to ' + document.getElementById('interval').value * 1000)
-        });
-
-        // Set the initial interval when the page loads
-        currentInterval = setInterval(fetchNodesData, document.getElementById('interval').value * 1000);
-
-        function submitChanges(nodeId) {
-            // 1. Grab the current values of the editable cells for a given node.
-            let cellValue = document.getElementById(`cell-edit-${nodeId}`).value;
-            let offsetValue = document.getElementById(`offset-edit-${nodeId}`).value;
-            let scaleValue = document.getElementById(`scale-edit-${nodeId}`).value;
-
-            // Construct the data payload to send
-            let data = {
-                set: {
-                    node_id: nodeId,
-                    cell: parseInt(cellValue),
-                    callibration_offset: parseFloat(offsetValue),
-                    callibration_scale: parseFloat(scaleValue)
+                    updateParent();
                 }
-            };
 
-            // 2. Send those values to the server
-            fetch('/updateNode', {
-                method: 'POST',
-                headers: {
-                    'Content-Type': 'application/json',
-                },
-                body: JSON.stringify(data),
-            })
-                .then(response => response.json())
-                .then(data => {
-                    // Handle server response
-                    console.log(data);
-                })
-                .catch((error) => {
-                    console.error('Error:', error);
+                function fetchNodesData() {
+                    fetch('/getNodes')
+                        .then(response => response.json())
+                        .then(data => {
+                            updateNodesTable(data.nodes);
+                        });
+                }
+
+                function toggleSDwrite() {
+                    fetch('/toggleSD')
+                        .then(response => response.json())
+                        .then(data => {
+                            const sdDiv = document.getElementById('sd-color');
+                            if (data.sdStatus) {
+                                sdDiv.style.backgroundColor = 'green';
+                                sdDiv.innerHTML = '<p style="text-align: center; justify-content: center;">Writing to sd output</p>';
+                            } else {
+                                sdDiv.style.backgroundColor = 'red';
+                                sdDiv.innerHTML = '<p style="text-align: center; justify-content: center;">Not currently writing to sd output</p>';
+                            }
+                        });
+                }
+
+                // Fetch nodes data on page load
+                window.onload = fetchNodesData;
+
+                let currentInterval;
+
+                document.getElementById('interval').addEventListener('change', function () {
+                    // Clear the existing interval
+                    if (currentInterval) {
+                        clearInterval(currentInterval);
+                    }
+
+                    // Set the new interval based on the input value
+                    const milliseconds = this.value * 1000;
+                    currentInterval = setInterval(fetchNodesData, milliseconds);
+                    console.log('changed to ' + document.getElementById('interval').value * 1000)
                 });
 
-            isEditing = false;
-            fetchNodesData();
-        }
+                // Set the initial interval when the page loads
+                currentInterval = setInterval(fetchNodesData, document.getElementById('interval').value * 1000);
+
+                function submitChanges(nodeId) {
+                    // 1. Grab the current values of the editable cells for a given node.
+                    let cellValue = document.getElementById(`cell-edit-${nodeId}`).value;
+                    let offsetValue = document.getElementById(`offset-edit-${nodeId}`).value;
+                    let scaleValue = document.getElementById(`scale-edit-${nodeId}`).value;
+
+                    // Construct the data payload to send
+                    let data = {
+                        set: {
+                            node_id: nodeId,
+                            cell: parseInt(cellValue),
+                            callibration_offset: parseFloat(offsetValue),
+                            callibration_scale: parseFloat(scaleValue)
+                        }
+                    };
+
+                    // 2. Send those values to the server
+                    fetch('/updateNode', {
+                        method: 'POST',
+                        headers: {
+                            'Content-Type': 'application/json',
+                        },
+                        body: JSON.stringify(data),
+                    })
+                        .then(response => response.json())
+                        .then(data => {
+                            // Handle server response
+                            console.log(data);
+                        })
+                        .catch((error) => {
+                            console.error('Error:', error);
+                        });
+
+                    isEditing = false;
+                    fetchNodesData();
+                }
 
 
-        function enableEditing(nodeId) {
-            isEditing = true;
-            let rowToEdit = document.getElementById(`row${nodeId}`);
-            let cells = rowToEdit.querySelectorAll("td");
+                function enableEditing(nodeId) {
+                    isEditing = true;
+                    let rowToEdit = document.getElementById(`row${nodeId}`);
+                    let cells = rowToEdit.querySelectorAll("td");
 
-            document.getElementById(`edit-${nodeId}`).style.display = 'none';
-            document.getElementById(`submit-${nodeId}`).style.display = 'inline-block';
-            document.getElementById(`cancel-${nodeId}`).style.display = 'inline-block';
+                    document.getElementById(`edit-${nodeId}`).style.display = 'none';
+                    document.getElementById(`submit-${nodeId}`).style.display = 'inline-block';
+                    document.getElementById(`cancel-${nodeId}`).style.display = 'inline-block';
 
-            document.getElementById(`cell-edit-${nodeId}`).style.display = 'inline-block';
-            document.getElementById(`offset-edit-${nodeId}`).style.display = 'inline-block';
-            document.getElementById(`scale-edit-${nodeId}`).style.display = 'inline-block';
-            document.getElementById(`cell-${nodeId}`).style.display = 'none';
-            document.getElementById(`offset-${nodeId}`).style.display = 'none';
-            document.getElementById(`scale-${nodeId}`).style.display = 'none';
-        }
+                    document.getElementById(`cell-edit-${nodeId}`).style.display = 'inline-block';
+                    document.getElementById(`offset-edit-${nodeId}`).style.display = 'inline-block';
+                    document.getElementById(`scale-edit-${nodeId}`).style.display = 'inline-block';
+                    document.getElementById(`cell-${nodeId}`).style.display = 'none';
+                    document.getElementById(`offset-${nodeId}`).style.display = 'none';
+                    document.getElementById(`scale-${nodeId}`).style.display = 'none';
+                }
 
-        function cancelEdit(nodeId) {
-            isEditing = false;
-            let rowToEdit = document.getElementById(`row${nodeId}`);
-            let cells = rowToEdit.querySelectorAll("td");
-            fetchNodesData();  // Reloads original data
-            document.getElementById(`edit-${nodeId}`).style.display = 'inline-block';
-            document.getElementById(`submit-${nodeId}`).style.display = 'none';
-            document.getElementById(`cancel-${nodeId}`).style.display = 'none';
-        }
+                function cancelEdit(nodeId) {
+                    isEditing = false;
+                    let rowToEdit = document.getElementById(`row${nodeId}`);
+                    let cells = rowToEdit.querySelectorAll("td");
+                    fetchNodesData();  // Reloads original data
+                    document.getElementById(`edit-${nodeId}`).style.display = 'inline-block';
+                    document.getElementById(`submit-${nodeId}`).style.display = 'none';
+                    document.getElementById(`cancel-${nodeId}`).style.display = 'none';
+                }
 
-        function updateParent() {
-            fetch('/parent')
-                .then(response => response.json())
-                .then(data => {
-                    // Structure is {v: voltage, c: current, s: soc, vn: voltageNodes}
-                    document.getElementById('p_v').textContent = data.v;
-                    document.getElementById('p_vn').textContent = data.vn;
-                    document.getElementById('p_c').textContent = data.c;
-                    document.getElementById('p_s').textContent = data.s;
-                });
-        }
+                function updateParent() {
+                    fetch('/parent')
+                        .then(response => response.json())
+                        .then(data => {
+                            // Structure is {v: voltage, c: current, s: soc, vn: voltageNodes}
+                            document.getElementById('p_v').textContent = data.v;
+                            document.getElementById('p_vn').textContent = data.vn;
+                            document.getElementById('p_c').textContent = data.c;
+                            document.getElementById('p_s').textContent = data.s;
+                            document.getElementById('p_tt').textContent = data.tt;
+                        });
+                }
 
-        function calibrateCurrent() {
-            fetch('/calibrateCurrent');
-        }
-    </script>
+                function calibrateCurrent() {
+                    fetch('/calibrateCurrent');
+                }
+            </script>
 </body>
 
 </html>
@@ -569,7 +618,7 @@ void webserver() {
 
 
     server.on("/parent", HTTP_GET, [](AsyncWebServerRequest *request) {
-        String response = String("{\"v\":") + getVoltageRead() + ",\"c\":" + getCurrent() + ",\"s\":" + getSOC() + ",\"vn\":" + getVoltageNodes() + "}";
+        String response = String("{\"v\":") + parent.voltage + ",\"c\":" + parent.current + ",\"s\":" + parent.soc + ",\"tt\":" + parent.tt + ",\"vn\":" + parent.voltage_nodes + "}";
         request->send(200, "application/json", response);
     });
 
