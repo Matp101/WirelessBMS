@@ -11,19 +11,23 @@
 #include <ESPAsyncWebServer.h>
 #include <fuelgauge.hpp>
 
-#include <SPI.h>
-#include <SD.h>
-
 #include "batteries.h"
 #include "config.h"
 #include "adv_config.h"
+#include "SDCardManager.h"
 
-#if defined(DEBUG_SERIAL) && !defined(PRINTF)
-#define PRINTF(...)             \
-  {                             \
-    Serial.printf(__VA_ARGS__); \
-  }
+#if defined(DEBUG_SERIAL)
+#if !defined(PRINTF) 
+#define PRINTF(...) { Serial.printf(__VA_ARGS__); }
 #endif
+#if !defined(PRINTLN) 
+#define PRINTLN(...) { Serial.println(__VA_ARGS__); }
+#endif
+#if !defined(PRINT)
+#define PRINT(...) { Serial.print(__VA_ARGS__); }
+#endif
+#endif
+
 #if defined(DEBUG_LED) && defined(LED_BUILTIN)
 #define LED LED_BUILTIN
 #endif
@@ -53,6 +57,8 @@ float getTT();
 int calibrateCurrent();
 void updateValues();
 void webserver();
+String toJson();
+String toCsv(bool includeHeaders);
 
 Parent parent;
 
@@ -70,6 +76,11 @@ ACS712 current_sensor(CURRENT_SENSOR_TYPE, CURRENT_SENSOR_PIN, 3.3, 4095);
 FuelGauge fuel_gauge(BATTERY_NOMINAL_CAPACITY, BATTERY_INTERNAL_RESISTANCE, BATTERY_MAX_VOLTAGE, BATTERY_LOAD_CURRENT, 4);
 
 std::map<uint32_t, String> nodeData; // NodeID -> JSON data
+
+SDCardManager sdCardManager(SD_CS_PIN);
+bool writing_to_sd = false;
+bool sdCardPresent = false;
+String file_name = "";
 
 bool fuel_gauge_initialized = false;
 
@@ -107,6 +118,10 @@ void setup()
   // userScheduler.addTask( taskSendMessage );
   // taskSendMessage.enable();
 
+#ifdef SD_CARD_ENABLE
+  sdCardManager.begin();
+#endif
+
 #ifdef DEBUG_LED
   blinkNoNodes.set(BLINK_PERIOD, (mesh.getNodeList().size() + 1) * 2, []()
                    {
@@ -138,7 +153,10 @@ void setup()
 }
 
 
-static unsigned long lastUpdate = 0;
+static unsigned long lastUpdateData = 0;
+static unsigned long lastUpdateSerial = 0;
+static unsigned long lastRetrySD = 0;
+static unsigned long lastUpdateSD = 0;
 void loop()
 {
   // mesh connected
@@ -151,25 +169,49 @@ void loop()
   }
 
   //update current, voltage, soc, tt
-  if (millis() - lastUpdate > 1000)
+  if (millis() - lastUpdateData > 1000)
   {
-    lastUpdate = millis();
+    lastUpdateData = millis();
     updateValues();
   }
 
   // Send JSON to Serial
   #ifdef JSON_SERIAL
-  if (millis() - lastUpdate > JSON_SERIAL_INTERVAL)
+  if (millis() - lastUpdateSerial > JSON_SERIAL_INTERVAL)
   {
-    lastUpdate = millis();
-    PRINTF(toJson().c_str());
+    lastUpdateSerial = millis();
+    JSON_SERIAL.println(toJson().c_str());
+  }
+  #endif
+
+  // Write to SD card
+  #ifdef SD_CARD_ENABLE
+  //Check if SD card is present
+  if (millis() - lastRetrySD > SD_RETRY_INTERVAL){
+    lastRetrySD = millis();
+    sdCardPresent = sdCardManager.isCardPresent();
+    if (sdCardPresent){
+      if (!writing_to_sd){
+        writing_to_sd = true;
+        file_name = sdCardManager.getNextFileName(SD_CARD_FILE_PREFIX, SD_CARD_FILE_SUFFIX);
+      }
+    } else {
+      if (writing_to_sd){
+        writing_to_sd = false;
+      }
+    }
+  }
+  if (writing_to_sd && millis() - lastUpdateSD > SD_CARD_UPDATE_INTERVAL * 1000){
+    lastUpdateSD = millis();
+    String data = toCsv();
+    sdCardManager.appendFile(String(SD_CARD_FILE_PREFIX) + String(SD_CARD_FILE_SUFFIX), data.c_str());
   }
   #endif
 
   // Blink LED if mesh is connected
-#ifdef DEBUG_LED
+  #ifdef DEBUG_LED
   digitalWrite(LED, !onFlag);
-#endif
+  #endif
 }
 
 // Send back to main node all the details about itself, if main node yet then broadcast
@@ -187,7 +229,6 @@ void sendMessage()
   DynamicJsonDocument doc(256);
   doc["info"]["serial_number"] = SERIAL_NUMBER;
   doc["info"]["cell"] = 0;
-  // doc["info"]["node_id"] =
 
   String jsonString;
   serializeJson(doc, jsonString);
@@ -691,6 +732,17 @@ void webserver() {
 String toJson() {
     // Create a larger JSON document to handle all data
     DynamicJsonDocument doc(4096);
+    JsonObject dataJson = doc.createNestedObject("data");
+    dataJson["time"] = millis();
+    dataJson["free_mem"] = ESP.getFreeHeap();
+    dataJson["sd_out"] = false;   //TODO: SD card output
+
+    JsonObject infoJson = doc.createNestedObject("wifi");
+    infoJson["ip"] = myAPIP.toString();
+    infoJson["mac"] = WiFi.macAddress();
+    infoJson["rssi"] = WiFi.RSSI();
+    infoJson["ssid"] = WiFi.SSID();
+    infoJson["channel"] = WiFi.channel();
 
     // Create an object for parent data
     JsonObject parentJson = doc.createNestedObject("parent");
@@ -716,5 +768,54 @@ String toJson() {
     return response;
 }
 
+String toCsv(bool includeHeaders = false) {
+  String csv = "";
+  if (includeHeaders){
+    String headers = "";
+    headers += "time,";
+    headers += "free_mem,";
+    headers += "parent_voltage,";
+    headers += "parent_current,";
+    headers += "parent_soc,";
+    headers += "parent_tt,";
+    headers += "parent_voltage_nodes,";
+    for (const auto& pair : nodeData) {
+      DynamicJsonDocument nodeDoc(256);
+      DeserializationError error = deserializeJson(nodeDoc, pair.second);
+      if (!error) {
+        headers += "node_" + String(nodeDoc["info"]["id"].as<uint32_t>()) + "_cell,";
+        headers += "node_" + String(nodeDoc["info"]["id"].as<uint32_t>()) + "_voltage,";
+        headers += "node_" + String(nodeDoc["info"]["id"].as<uint32_t>()) + "_voltage_raw,";
+        headers += "node_" + String(nodeDoc["info"]["id"].as<uint32_t>()) + "_balance_state,";
+        headers += "node_" + String(nodeDoc["info"]["id"].as<uint32_t>()) + "_calibration_offset,";
+        headers += "node_" + String(nodeDoc["info"]["id"].as<uint32_t>()) + "_calibration_scale,";
+        headers += "node_" + String(nodeDoc["info"]["id"].as<uint32_t>()) + "_free_mem,";
+      }
+    }
+    headers += "\n";
+  }
+  csv += String(millis()) + ",";
+  csv += String(ESP.getFreeHeap()) + ",";
+  csv += String(parent.voltage) + ",";
+  csv += String(parent.current) + ",";
+  csv += String(parent.soc) + ",";
+  csv += String(parent.tt) + ",";
+  csv += String(parent.voltage_nodes) + ",";
+  for (const auto& pair : nodeData) {
+    DynamicJsonDocument nodeDoc(256);
+    DeserializationError error = deserializeJson(nodeDoc, pair.second);
+    if (!error) {
+      csv += String(nodeDoc["info"]["cell"].as<uint32_t>()) + ",";
+      csv += String(nodeDoc["cell"]["v"].as<float>()) + ",";
+      csv += String(nodeDoc["cell"]["v_raw"].as<float>()) + ",";
+      csv += String(nodeDoc["bal"]["state"].as<bool>()) + ",";
+      csv += String(nodeDoc["cell"]["cal_offset"].as<float>()) + ",";
+      csv += String(nodeDoc["cell"]["cal_scale"].as<float>()) + ",";
+      csv += String(nodeDoc["info"]["free_mem"].as<uint32_t>()) + ",";
+    }
+  }
+  csv += "\n";
+  return csv;
+}
 
 #endif // MASTER

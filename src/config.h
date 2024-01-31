@@ -27,7 +27,7 @@
 // Update interval
 #define UPDATE_INTERVAL 1           // seconds, how often update data
 // JSON output to Serial
-#define JSON_SERIAL 1               // 0: off, 1: on
+#define JSON_SERIAL Serial               // Comment out to disable JSON output to Serial
 #define JSON_SERIAL_INTERVAL 1000   // milliseconds, how often to send data
 
 // CHILD
