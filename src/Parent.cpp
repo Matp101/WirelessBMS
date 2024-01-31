@@ -157,6 +157,15 @@ void loop()
     updateValues();
   }
 
+  // Send JSON to Serial
+  #ifdef JSON_SERIAL
+  if (millis() - lastUpdate > JSON_SERIAL_INTERVAL)
+  {
+    lastUpdate = millis();
+    PRINTF(toJson().c_str());
+  }
+  #endif
+
   // Blink LED if mesh is connected
 #ifdef DEBUG_LED
   digitalWrite(LED, !onFlag);
