@@ -9,3 +9,4 @@ lib/SD
 lib/SD_MMC
 
 src/site.html
+*.old
