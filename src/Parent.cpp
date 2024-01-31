@@ -66,8 +66,8 @@ IPAddress getlocalIP();
 AsyncWebServer server(80);
 IPAddress myAPIP(IP_ADDRESS);
 
-ACS712 current_sensor(CURRENT_SENSOR_TYPE, CURRENT_SENSOR_PIN);
-FuelGauge fuel_gauge(BATTERY_NOMINAL_CAPACITY, BATTERY_INTERNAL_RESISTANCE, BATTERY_MAX_VOLTAGE, BATTERY_LOAD_CURRENT);
+ACS712 current_sensor(CURRENT_SENSOR_TYPE, CURRENT_SENSOR_PIN, 3.3, 4095);
+FuelGauge fuel_gauge(BATTERY_NOMINAL_CAPACITY, BATTERY_INTERNAL_RESISTANCE, BATTERY_MAX_VOLTAGE, BATTERY_LOAD_CURRENT, 4);
 
 std::map<uint32_t, String> nodeData; // NodeID -> JSON data
 
@@ -82,9 +82,6 @@ bool onFlag = false;
 void setup()
 {
   Serial.begin(115200);
-
-  current_sensor.begin();
-
 #ifdef DEBUG_LED
   pinMode(LED, OUTPUT);
 #endif
@@ -105,7 +102,7 @@ void setup()
   mesh.setContainsRoot(true);
 
   myAPIP = IPAddress(mesh.getAPIP());
-  Serial.println("My AP IP is " + myAPIP.toString());
+  PRINTF("My API IP is %d.%d.%d.%d\n", myAPIP[0], myAPIP[1], myAPIP[2], myAPIP[3]);
 
   // userScheduler.addTask( taskSendMessage );
   // taskSendMessage.enable();
@@ -149,7 +146,7 @@ void loop()
 
   if(!fuel_gauge_initialized && getCurrent() == 0.0f){
     PRINTF("Initializing Fuel Gauge\n");
-    fuel_gauge.initialize(getCurrent(), getVoltageRead(), &parent.soc, &parent.tt);
+    fuel_gauge.initialize(getCurrent(), getVoltageNodes(), &parent.soc, &parent.tt);
     fuel_gauge_initialized = true;
   }
 
@@ -303,7 +300,7 @@ float getVoltageRead(){
 }
 
 float getCurrent(){
-  parent.current = current_sensor.getCurrentDC();
+  parent.current = current_sensor.getDC();
   return parent.current;
 }
 
@@ -318,16 +315,22 @@ float getTT(){
 }
 
 int calibrateCurrent(){
-  fuel_gauge.initialize(0.0f, getVoltageRead(), &parent.soc, &parent.tt);
-  return current_sensor.calibrate();
+  fuel_gauge.initialize(0.0f, getVoltageNodes(), &parent.soc, &parent.tt);
+  fuel_gauge_initialized = true;
+  return current_sensor.autoCalibrate();
 }
 
 void updateValues(){
   parent.voltage = getVoltageRead();
   parent.voltage_nodes = getVoltageNodes();
   parent.current = getCurrent();
-  parent.soc = getSOC();
-  parent.tt = getTT();
+  if(fuel_gauge_initialized){
+    //negate current
+    float currentdraw = -parent.current;
+    fuel_gauge.update(currentdraw, &parent.soc, &parent.tt);
+  }
+  //String out = "V:" + String(parent.voltage) + " VN:" + String(parent.voltage_nodes) + " C:" + String(parent.current) + " SOC:" + String(parent.soc) + " TT:" + String(parent.tt) + "\n";
+  //PRINTF(out.c_str())
 }
 
 //==========================================================================================
@@ -365,10 +368,10 @@ const PROGMEM char* WEBSITE_HTML = R"html(
             <thead>
                 <tr>
                     <th><strong>Voltage (V)</strong></th>
-                    <th><strong>Voltage Nodes(V)</strong></th>
-                    <th><strong>Current (mah)</strong></th>
-                    <th><strong>SOC</strong></th>
-                    <th><strong>TTS</strong></th>
+                    <th><strong>Voltage Nodes (V)</strong></th>
+                    <th><strong>Discharge Current (A)</strong></th>
+                    <th><strong>SOC (%)</strong></th>
+                    <th><strong>TTS (h)</strong></th>
                     </tr>
                 </thead>
                 <tbody>
@@ -422,6 +425,8 @@ const PROGMEM char* WEBSITE_HTML = R"html(
 
                 function updateNodesTable(nodes) {
                     if (isEditing) return;
+
+                    nodes.sort((a, b) => a.info.cell - b.info.cell);
                     let tableContent = '';
                     nodes.forEach(node => {
                         tableContent += `<tr id="row${node.info.id}">
@@ -571,7 +576,7 @@ const PROGMEM char* WEBSITE_HTML = R"html(
                             document.getElementById('p_v').textContent = data.v;
                             document.getElementById('p_vn').textContent = data.vn;
                             document.getElementById('p_c').textContent = data.c;
-                            document.getElementById('p_s').textContent = data.s;
+                            document.getElementById('p_s').textContent = data.s*100;
                             document.getElementById('p_tt').textContent = data.tt;
                         });
                 }
@@ -671,6 +676,35 @@ void webserver() {
     } });
 
     server.begin();
+}
+
+
+String toJson() {
+    // Create a larger JSON document to handle all data
+    DynamicJsonDocument doc(4096);
+
+    // Create an object for parent data
+    JsonObject parentJson = doc.createNestedObject("parent");
+    parentJson["voltage"] = parent.voltage;
+    parentJson["current"] = parent.current;
+    parentJson["soc"] = parent.soc;
+    parentJson["tt"] = parent.tt;
+    parentJson["voltage_nodes"] = parent.voltage_nodes;
+
+    // Create an array for nodes data
+    JsonArray nodesArray = doc.createNestedArray("nodes");
+    for (const auto& pair : nodeData) {
+        DynamicJsonDocument nodeDoc(256);
+        DeserializationError error = deserializeJson(nodeDoc, pair.second);
+        if (!error) {
+            nodesArray.add(nodeDoc.as<JsonObject>());
+        }
+    }
+
+    // Serialize the JSON document to a string
+    String response;
+    serializeJson(doc, response);
+    return response;
 }
 
 

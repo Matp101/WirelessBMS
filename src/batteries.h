@@ -8,5 +8,5 @@
   #define BATTERY_MIN_VOLTAGE 3.0f            // V
 
   #define BATTERY_INTERNAL_RESISTANCE 0.001f  // Ohm
-  #define BATTERY_LOAD_CURRENT 0.250f         // A
+  #define BATTERY_LOAD_CURRENT 1.0f         // A
 #endif

@@ -1,5 +1,5 @@
 // Debug
-#define DEBUG_SERIAL 2              // 0: off, 1: info, 2: debug
+#define DEBUG_SERIAL 1              // 0: off, 1: info, 2: debug
 // LED
 #define DEBUG_LED                   // Comment out to disable LED blinking
 #define BLINK_PERIOD    3000        // milliseconds until cycle repeat
@@ -7,7 +7,7 @@
 
 #define SERIAL_NUMBER 0x00000000    // 32-bit unsigned integer, 0x00000000 to 0xFFFFFFFF
 
-// MASTER
+// PARENT
 #define MESH_SSID       "bms"       // Mesh network SSID
 #define MESH_PASSWORD   "bmslab123" // Must be at least 8 characters long
 #define MESH_PORT       5555        // Mesh port to use
@@ -17,7 +17,7 @@
 #define HOSTNAME "HTTP_BRIDGE"
 #define IP_ADDRESS 4,3,2,1
 // Current Sensor
-#define CURRENT_SENSOR_PIN 32            // Pin to read the current sensor from
+#define CURRENT_SENSOR_PIN 34            // Pin to read the current sensor from
 #define CURRENT_SENSOR_TYPE ACS712_30A // Type of current sensor, ACS712_05B, ACS712_20A, ACS712_30A
 // SD Card (SD CARD must be in FAT32 format)
 #define SD_CS_PIN 5                // Pin to use for SD card chip select
@@ -26,8 +26,11 @@
 #define SD_MISO_PIN 19              // Pin to use for SD card MISO
 // Update interval
 #define UPDATE_INTERVAL 1           // seconds, how often update data
+// JSON output to Serial
+#define JSON_SERIAL 1               // 0: off, 1: on
+#define JSON_SERIAL_INTERVAL 1000   // milliseconds, how often to send data
 
-// SLAVE
+// CHILD
 #define BALANCER_PIN 2              // Pin to control the balancer
 #define BALANCER_INVERTED false     // Set to true if the balancer is active low
 // Indvidual cell voltage 
