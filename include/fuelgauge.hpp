@@ -26,12 +26,13 @@ private:
 
     unsigned long _t_prev;      // previous time
     float _SOC_prev;            // initial values
+    unsigned long _t;           // current time
 
     float SOC;      // State of charge
     float TTS;      // Time to empty
     float _SOCt;    // SOC at time t
 
-    int _cell_count = 4;
+    int _cell_count = 0;
     bool _updated_table = false;
 
     // SOC table data
@@ -86,11 +87,11 @@ private:
     }
 
 public:
-    FuelGauge(float capacity = 4.2f, float internal_resistance = 0.001f, float Vmin = 2.7f, float load = 0.250f, int cell_count = 4)
+    FuelGauge(float capacity = 4.2f, float internal_resistance = 0.001f, float Vmin = 2.7f, float load = 1.0f, int cell_count = 4)
     {
         this->_Q = capacity;
-        this->_R = internal_resistance;
-        this->_Vmin = Vmin;
+        this->_R = internal_resistance*float(cell_count);
+        this->_Vmin = Vmin*float(cell_count);
         this->_IL = load;
 
         // Initialize previous values
@@ -107,10 +108,12 @@ public:
 
     void initialize(float I0, float V0, float *SOC0, float *TTS0)
     {
+
         // Initial SOC
         float OCV0 = V0 - I0 * _R;
         *SOC0 = _SOCLookup(OCV0);
 
+        printf("%f %f %f %f %f\n", *SOC0, OCV0, V0, I0, _R);
         float SOCd = *SOC0 - _SOCt;
         *TTS0 = SOCd * _Q / _IL;
 
@@ -119,13 +122,21 @@ public:
         _SOC_prev = *SOC0;
     }
 
-    void loop(float I_k, float *SOC_k, float *TTS_k)
+    void update(float I_k, float *SOC_k, float *TTS_k)
     {
-        unsigned long delta_k = (millis() / 1000) - _t_prev; // seconds
+        unsigned long curtime = millis();
+        unsigned long delta_k = (curtime / 1000) - _t_prev; // seconds
+
         float SOC_km1 = _SOC_prev;                  // SOC at k-1
+        I_k = I_k / 3600 * delta_k;                 // convert to A/s
 
         // SOC at k
         *SOC_k = SOC_km1 + I_k * float(delta_k) / _Q;
+        // printf("D1:%f  %f  %f  %f  %d  %d\n", ( I_k * float(delta_k) / _Q), SOC_km1, *SOC_k, I_k, curtime, delta_k);
+
+        _SOC_prev = *SOC_k;   
+        _t_prev = curtime / 1000; // seconds            
+
 
         // TTS at [k]
         float SOCd = *SOC_k - _SOCt;
@@ -134,8 +145,11 @@ public:
         // Update SOC
         SOC = *SOC_k;
         TTS = *TTS_k;
-    }
 
+        // printf("D2: %f %f %f %f\n", _SOCt, SOCd, _Q, _IL);
+
+        
+    }
     float getSOC()
     {
         return SOC;
